@@ -85,7 +85,7 @@ import {
 } from "../hooks/useGaplessPrefetch";
 import { useFavorites } from "../hooks/useFavorites";
 import { useShortcuts } from "../hooks/useShortcuts";
-import { useMcpBridge } from "../hooks/useMcpBridge";
+import { useMcpBridge, fetchSourceWithMetadata } from "../hooks/useMcpBridge";
 import { useOverlayBridge } from "../hooks/useOverlayBridge";
 import { useToast } from "../contexts/ToastContext";
 import {
@@ -196,6 +196,7 @@ export function AppInitializer() {
   // ---- Stable playback actions (no subscriptions) ----
   const {
     playTrack,
+    playAllFromSource,
     playNext,
     playPrevious,
     pauseTrack,
@@ -544,6 +545,17 @@ export function AppInitializer() {
     if (action.kind === "navigate") {
       const stamped = pushView(action.view);
       startTransition(() => setCurrentView(stamped));
+    } else if (action.kind === "playSource") {
+      // Same path as the Play button on the page: queue, source and context
+      fetchSourceWithMetadata(action.sourceType, action.id)
+        .then((data) => {
+          if (!data || data.tracks.length === 0) return;
+          return playAllFromSource(data.tracks, {
+            source: data.source,
+            albumMode: data.albumMode,
+          });
+        })
+        .catch((err) => console.error("Deep link play failed:", err));
     } else {
       // playTrack: fetch track metadata, then play
       getTrack(action.trackId)

@@ -86,7 +86,7 @@ We went beyond the basics with direct-to-DAC bit-perfect ALSA output, a resizabl
 
 - **Library management** — browse and sort your playlists, albums, artists, and mixes with playlist folder support
 - **Share** — share tracks, albums, playlists, artists, and mixes with your friends via a direct TIDAL link
-- **Deep links** — open `tidal://` URLs directly in SONE
+- **Deep links** — open `tidal://` URLs directly in SONE; append `/play` to a playlist, album, or mix link (e.g. `tidal://playlist/<uuid>/play`) to start playing it
 - **Profile** — edit your bio, social links, and avatar
 
 ### Integrations

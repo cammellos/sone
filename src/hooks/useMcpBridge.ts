@@ -61,7 +61,7 @@ type SourceData = {
   albumMode?: boolean;
 };
 
-async function fetchSourceWithMetadata(
+export async function fetchSourceWithMetadata(
   sourceType: string,
   id: string,
 ): Promise<SourceData | null> {
