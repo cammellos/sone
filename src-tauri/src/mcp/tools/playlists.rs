@@ -3,9 +3,7 @@ use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ErrorData, tool_router};
 use serde::Deserialize;
-use tauri::{Emitter, Manager};
 
-use crate::AppState;
 use crate::mcp::events::{
     EV_PLAYLIST_CREATED, EV_PLAYLIST_DELETED, EV_PLAYLIST_TRACKS_CHANGED, EV_PLAYLIST_UPDATED,
     PlaylistDeletedPayload, PlaylistTracksChangedPayload, PlaylistUpdatedPayload,
@@ -110,8 +108,8 @@ impl SoneMcpServer {
         &self,
         Parameters(_): Parameters<NoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let owned = client
             .get_user_playlists(user_id, 0, 200)
@@ -143,8 +141,8 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<GetPlaylistTracksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let uuid = resolve_playlist_uuid(
             &mut client,
@@ -177,8 +175,8 @@ impl SoneMcpServer {
             return Err(ErrorData::invalid_params("Playlist name required", None));
         }
         let description = args.description.unwrap_or_default();
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let playlist = client
             .create_playlist(&name, &description, "PUBLIC")
@@ -195,15 +193,15 @@ impl SoneMcpServer {
             0
         };
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("user:{}", user_id))
             .await;
-        state.disk_cache.invalidate_tag("folders").await;
-        self.app_handle
+        state.disk_cache().invalidate_tag("folders").await;
+        self.host.sink()
             .emit(EV_PLAYLIST_CREATED, &playlist)
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         if track_count > 0 {
-            self.app_handle
+            self.host.sink()
                 .emit(
                     EV_PLAYLIST_TRACKS_CHANGED,
                     PlaylistTracksChangedPayload {
@@ -227,8 +225,8 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<UpdatePlaylistArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         // Fetch current playlist details to use as fallback for unchanged fields.
         let current = client
             .get_playlist_details(&args.playlist_uuid)
@@ -257,15 +255,15 @@ impl SoneMcpServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let user_id = require_user_id(&client)?;
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("user:{}", user_id))
             .await;
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("playlist:{}", args.playlist_uuid))
             .await;
-        state.disk_cache.invalidate_tag("folders").await;
-        self.app_handle
+        state.disk_cache().invalidate_tag("folders").await;
+        self.host.sink()
             .emit(
                 EV_PLAYLIST_UPDATED,
                 PlaylistUpdatedPayload {
@@ -289,23 +287,23 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<DeletePlaylistArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         client
             .delete_playlist(&args.playlist_uuid)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("user:{}", user_id))
             .await;
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("playlist:{}", args.playlist_uuid))
             .await;
-        state.disk_cache.invalidate_tag("folders").await;
-        self.app_handle
+        state.disk_cache().invalidate_tag("folders").await;
+        self.host.sink()
             .emit(
                 EV_PLAYLIST_DELETED,
                 PlaylistDeletedPayload {
@@ -330,8 +328,8 @@ impl SoneMcpServer {
         if args.track_ids.is_empty() {
             return Err(ErrorData::invalid_params("track_ids must not be empty", None));
         }
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let uuid = resolve_playlist_uuid(
             &mut client,
@@ -346,10 +344,10 @@ impl SoneMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("playlist:{}", uuid))
             .await;
-        self.app_handle
+        self.host.sink()
             .emit(
                 EV_PLAYLIST_TRACKS_CHANGED,
                 PlaylistTracksChangedPayload {
@@ -372,17 +370,17 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<RemoveTrackFromPlaylistArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         client
             .remove_track_from_playlist(&args.playlist_uuid, args.index)
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         state
-            .disk_cache
+            .disk_cache()
             .invalidate_tag(&format!("playlist:{}", args.playlist_uuid))
             .await;
-        self.app_handle
+        self.host.sink()
             .emit(
                 EV_PLAYLIST_TRACKS_CHANGED,
                 PlaylistTracksChangedPayload {

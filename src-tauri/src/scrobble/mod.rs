@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::crypto::Crypto;
@@ -160,13 +159,13 @@ pub struct ScrobbleManager {
     providers: RwLock<Vec<Box<dyn ScrobbleProvider>>>,
     queue: queue::ScrobbleQueue,
     current_track: Arc<Mutex<Option<TrackPlayback>>>,
-    app_handle: tauri::AppHandle,
+    app_handle: crate::events::EventSink,
     mb_lookup: Arc<musicbrainz::MusicBrainzLookup>,
 }
 
 impl ScrobbleManager {
     pub fn new(
-        app_handle: tauri::AppHandle,
+        app_handle: crate::events::EventSink,
         crypto: Arc<Crypto>,
         config_dir: &Path,
         http: crate::proxy_http::ProxiedHttp,

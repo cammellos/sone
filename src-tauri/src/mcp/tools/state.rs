@@ -3,9 +3,7 @@ use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ErrorData, tool_router};
 use serde::Deserialize;
-use tauri::Manager;
 
-use crate::AppState;
 use crate::mcp::server::SoneMcpServer;
 
 use super::util::NoArgs;
@@ -26,9 +24,7 @@ impl SoneMcpServer {
         &self,
         Parameters(_): Parameters<NoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let s = state.mcp_state.read().await;
-        let json = match &s.now_playing {
+        let json = match self.host.now_playing().await {
             Some(np) => serde_json::json!({ "nowPlaying": np }),
             None => serde_json::json!({ "nowPlaying": null }),
         };
@@ -46,10 +42,9 @@ impl SoneMcpServer {
         Parameters(args): Parameters<GetQueueArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let limit = args.limit.unwrap_or(20).min(50) as usize;
-        let state = self.app_handle.state::<AppState>();
-        let s = state.mcp_state.read().await;
-        let take: Vec<_> = s.queue.iter().take(limit).cloned().collect();
-        let total = s.queue.len();
+        let queue = self.host.queue().await;
+        let total = queue.len();
+        let take: Vec<_> = queue.into_iter().take(limit).collect();
         let json = serde_json::json!({ "queue": take, "totalSnapshot": total });
         Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
             json.to_string(),

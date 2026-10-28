@@ -5,14 +5,15 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use tauri::AppHandle;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SoneError;
+use crate::mcp::host::McpHost;
 
 #[derive(Clone)]
 pub struct SoneMcpServer {
-    pub(crate) app_handle: AppHandle,
+    pub(crate) host: Arc<dyn McpHost>,
     pub(crate) tool_router: ToolRouter<Self>,
 }
 
@@ -48,14 +49,14 @@ impl McpHandle {
 }
 
 pub async fn start_server(
-    app_handle: AppHandle,
+    host: Arc<dyn McpHost>,
     port: u16,
     token: String,
 ) -> Result<McpHandle, SoneError> {
     let cancel = CancellationToken::new();
 
     let server = SoneMcpServer {
-        app_handle: app_handle.clone(),
+        host,
         tool_router: crate::mcp::tools::build_router(),
     };
 

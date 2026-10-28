@@ -12,6 +12,7 @@
     {
       packages.${system} = {
         sone = pkgs.callPackage ./nix/package.nix { src = self; };
+        soned = pkgs.callPackage ./nix/daemon.nix { src = self; };
         default = self.packages.${system}.sone;
       };
 
@@ -44,6 +45,9 @@
 
       formatter.${system} = pkgs.nixfmt;
 
-      checks.${system}.build = self.packages.${system}.sone;
+      checks.${system} = {
+        build = self.packages.${system}.sone;
+        soned = self.packages.${system}.soned;
+      };
     };
 }

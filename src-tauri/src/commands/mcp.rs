@@ -71,7 +71,7 @@ pub async fn mcp_set_enabled(
         }
         if enabled {
             let h = crate::mcp::start_server(
-                app_handle.clone(),
+                crate::mcp::gui_host(&app_handle),
                 settings.mcp_port,
                 settings.mcp_token.clone(),
             )
@@ -102,7 +102,7 @@ pub async fn mcp_regenerate_token(
         }
         if settings.mcp_enabled {
             match crate::mcp::start_server(
-                app_handle.clone(),
+                crate::mcp::gui_host(&app_handle),
                 settings.mcp_port,
                 settings.mcp_token.clone(),
             )
@@ -113,7 +113,7 @@ pub async fn mcp_regenerate_token(
                     // Best-effort rollback with the old token so a working
                     // server isn't left dead.
                     if let Ok(h) = crate::mcp::start_server(
-                        app_handle.clone(),
+                        crate::mcp::gui_host(&app_handle),
                         old_settings.mcp_port,
                         old_settings.mcp_token.clone(),
                     )

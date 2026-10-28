@@ -1,4 +1,5 @@
 pub mod events;
+pub mod host;
 pub mod sanitizer;
 pub mod server;
 pub mod state_mirror;
@@ -13,6 +14,7 @@ pub use state_mirror::{
 /// Holds the `mcp_handle` lock across the whole check→bind→store so that
 /// concurrent callers (startup spawn + login restore) cannot both bind the
 /// port. No-op if MCP is disabled or a server is already running.
+#[cfg(feature = "gui")]
 pub(crate) async fn ensure_mcp_started(app: &tauri::AppHandle) {
     use tauri::Manager;
 
@@ -34,8 +36,14 @@ pub(crate) async fn ensure_mcp_started(app: &tauri::AppHandle) {
         }
     }
 
-    match start_server(app.clone(), settings.mcp_port, settings.mcp_token.clone()).await {
+    match start_server(gui_host(app), settings.mcp_port, settings.mcp_token.clone()).await {
         Ok(handle) => *guard = Some(handle),
         Err(e) => log::error!("MCP server failed to start: {e}"),
     }
+}
+
+/// The MCP host backed by the GUI's `AppState`.
+#[cfg(feature = "gui")]
+pub(crate) fn gui_host(app: &tauri::AppHandle) -> std::sync::Arc<dyn host::McpHost> {
+    std::sync::Arc::new(host::GuiHost::new(app.clone()))
 }

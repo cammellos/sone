@@ -1,27 +1,45 @@
+// The headless build (`--no-default-features`) compiles GUI-only helpers it
+// never calls; the GUI build still reports real dead code.
+#![cfg_attr(not(feature = "gui"), allow(dead_code, unused_imports))]
+
 mod audio;
 pub mod cache;
+#[cfg(feature = "gui")]
 mod commands;
 mod crypto;
+#[cfg(feature = "gui")]
 mod discord;
+#[cfg(feature = "gui")]
 mod discord_ipc;
 mod embedded_config;
 mod embedded_lastfm;
 mod embedded_librefm;
 mod error;
+pub mod daemon;
+pub mod engine;
+pub mod events;
+pub mod queue;
+#[cfg(feature = "tui")]
+pub mod tui;
+mod stream;
+#[cfg(feature = "gui")]
 mod idle_inhibit;
 pub mod logging;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "gui"))]
 mod mpris;
 mod rate_gate;
 mod scrobble;
 mod signal_path;
 mod pipeline_probe;
+#[cfg(feature = "gui")]
 mod theme_config;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "gui"))]
 mod tray;
 mod tidal_api;
+#[cfg(feature = "gui")]
 mod tidal_report;
 pub mod mcp;
+#[cfg(feature = "gui")]
 pub mod overlay;
 mod http_util;
 pub mod proxy;
@@ -39,8 +57,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(feature = "gui")]
 use tauri::{Emitter, Listener, Manager};
+#[cfg(feature = "gui")]
 use tauri_plugin_deep_link::DeepLinkExt;
+#[cfg(feature = "gui")]
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tidal_api::{AuthTokens, TidalClient};
 use tokio::sync::Mutex;
@@ -222,6 +243,7 @@ impl Default for Settings {
     }
 }
 
+#[cfg(feature = "gui")]
 pub struct AppState {
     pub audio_player: Arc<AudioPlayer>,
     pub pipeline_probe: Arc<crate::pipeline_probe::PipelineProbe>,
@@ -292,7 +314,7 @@ pub fn now_secs() -> u64 {
 /// refresh, including the automatic one after a 401 — without it the stored
 /// access token stays stale and each launch burns a 401 before the first
 /// request succeeds.
-fn persist_auth_tokens(path: &Path, crypto: &Crypto, tokens: &AuthTokens) {
+pub(crate) fn persist_auth_tokens(path: &Path, crypto: &Crypto, tokens: &AuthTokens) {
     let mut settings = fs::read(path)
         .ok()
         .and_then(|data| crypto.decrypt(&data).ok())
@@ -311,6 +333,7 @@ fn persist_auth_tokens(path: &Path, crypto: &Crypto, tokens: &AuthTokens) {
     }
 }
 
+#[cfg(feature = "gui")]
 impl AppState {
     fn new(app_handle: tauri::AppHandle) -> Self {
         // Get config dir
@@ -446,7 +469,7 @@ impl AppState {
         let proxied_http = crate::proxy_http::ProxiedHttp::from_settings(&proxy_settings, &host_caps);
 
         let scrobble_manager = scrobble::ScrobbleManager::new(
-            app_handle.clone(),
+            app_handle.clone().into(),
             crypto.clone(),
             &config_dir,
             proxied_http.clone(),
@@ -474,12 +497,12 @@ impl AppState {
             discord_handle.send(discord::DiscordCommand::Connect);
         }
 
-        let signal_path = Arc::new(SignalPathTracker::new(app_handle.clone()));
+        let signal_path = Arc::new(SignalPathTracker::new(app_handle.clone().into()));
         signal_path.set_audio_modes(exclusive_mode, bit_perfect);
         signal_path.set_normalization_enabled(volume_normalization);
 
         let audio_player = Arc::new(AudioPlayer::new(
-            app_handle.clone(),
+            app_handle.clone().into(),
             Arc::clone(&signal_path),
             proxy_settings.clone(),
         ));
@@ -617,9 +640,10 @@ impl AppState {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "gui"))]
 mod webview_proxy_auth;
 
+#[cfg(feature = "gui")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // File logger setup. Must happen before Tauri builds so early log

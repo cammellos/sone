@@ -10,7 +10,6 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder
 use crate::tidal_api::{AuthTokens, DeviceAuthResponse};
 use crate::AppState;
 use crate::AuthMethod;
-use crate::Settings;
 use crate::SoneError;
 
 /// Check if the given credentials match the embedded device-code defaults.
@@ -27,23 +26,7 @@ fn are_embedded_pkce_defaults(id: &str, secret: &str) -> bool {
         && secret == crate::embedded_config::stream_key_d()
 }
 
-/// Resolve credentials from saved settings, falling back to embedded defaults
-/// matching the saved auth_method (LoginCode → device-code pair, Pkce → PKCE pair).
-fn resolve_credentials(settings: &Settings) -> (String, String) {
-    if !settings.client_id.is_empty() {
-        return (settings.client_id.clone(), settings.client_secret.clone());
-    }
-    match settings.auth_method {
-        AuthMethod::Pkce if crate::embedded_config::has_pkce_keys() => (
-            crate::embedded_config::stream_key_c(),
-            crate::embedded_config::stream_key_d(),
-        ),
-        _ => (
-            crate::embedded_config::stream_key_a(),
-            crate::embedded_config::stream_key_b(),
-        ),
-    }
-}
+use crate::engine::resolve_credentials;
 
 /// Extract a value for `key=<value>` from URL-encoded / form-data text.
 fn extract_form_value(text: &str, key: &str) -> Option<String> {

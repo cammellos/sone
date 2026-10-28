@@ -3,9 +3,7 @@ use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ErrorData, tool_router};
 use serde::Deserialize;
-use tauri::{Emitter, Manager};
 
-use crate::AppState;
 use crate::mcp::events::{EV_FAVORITE_CHANGED, FavoriteChangedPayload};
 use crate::mcp::sanitizer::{SanitizedAlbum, SanitizedArtist, backfill_and_sanitize_tracks};
 use crate::mcp::server::SoneMcpServer;
@@ -45,8 +43,8 @@ impl SoneMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let limit = args.limit.unwrap_or(50).min(100);
         let offset = args.offset.unwrap_or(0);
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let resp = client
             .get_favorite_tracks(user_id, offset, limit, "DATE", "DESC")
@@ -75,8 +73,8 @@ impl SoneMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let limit = args.limit.unwrap_or(50).min(100);
         let offset = args.offset.unwrap_or(0);
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let resp = client
             .get_favorite_albums(user_id, offset, limit, "DATE", "DESC")
@@ -105,8 +103,8 @@ impl SoneMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let limit = args.limit.unwrap_or(50).min(100);
         let offset = args.offset.unwrap_or(0);
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let resp = client
             .get_favorite_artists(user_id, offset, limit, "DATE", "DESC")
@@ -133,8 +131,8 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<TrackIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         let favorited = client
             .is_track_favorited(user_id, args.track_id)
@@ -160,8 +158,8 @@ impl SoneMcpServer {
                 None,
             ));
         }
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         if args.action == "add" {
             client
@@ -175,8 +173,8 @@ impl SoneMcpServer {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         }
         drop(client);
-        state.disk_cache.invalidate_tag("fav-tracks").await;
-        self.app_handle
+        state.disk_cache().invalidate_tag("fav-tracks").await;
+        self.host.sink()
             .emit(
                 EV_FAVORITE_CHANGED,
                 FavoriteChangedPayload {
@@ -206,8 +204,8 @@ impl SoneMcpServer {
                 None,
             ));
         }
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         if args.action == "add" {
             client
@@ -221,8 +219,8 @@ impl SoneMcpServer {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         }
         drop(client);
-        state.disk_cache.invalidate_tag("fav-albums").await;
-        self.app_handle
+        state.disk_cache().invalidate_tag("fav-albums").await;
+        self.host.sink()
             .emit(
                 EV_FAVORITE_CHANGED,
                 FavoriteChangedPayload {
@@ -252,8 +250,8 @@ impl SoneMcpServer {
                 None,
             ));
         }
-        let state = self.app_handle.state::<AppState>();
-        let client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let client = state.tidal_client().lock().await;
         let user_id = require_user_id(&client)?;
         if args.action == "add" {
             client
@@ -267,8 +265,8 @@ impl SoneMcpServer {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         }
         drop(client);
-        state.disk_cache.invalidate_tag("fav-artists").await;
-        self.app_handle
+        state.disk_cache().invalidate_tag("fav-artists").await;
+        self.host.sink()
             .emit(
                 EV_FAVORITE_CHANGED,
                 FavoriteChangedPayload {

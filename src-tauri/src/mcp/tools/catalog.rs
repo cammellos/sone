@@ -3,9 +3,7 @@ use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ErrorData, tool_router};
 use serde::Deserialize;
-use tauri::Manager;
 
-use crate::AppState;
 use crate::mcp::sanitizer::{SanitizedAlbum, SanitizedArtist, SanitizedPlaylist, backfill_and_sanitize_tracks};
 use crate::mcp::server::SoneMcpServer;
 
@@ -56,9 +54,9 @@ impl SoneMcpServer {
         Parameters(SearchTracksArgs { query, limit }): Parameters<SearchTracksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let limit = limit.unwrap_or(10).min(50);
-        let state = self.app_handle.state::<AppState>();
+        let state = &*self.host;
         let results = state
-            .tidal_client
+            .tidal_client()
             .lock()
             .await
             .search(&query, limit)
@@ -85,8 +83,8 @@ impl SoneMcpServer {
         Parameters(TrackRadioArgs { track_id, limit }): Parameters<TrackRadioArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let limit = limit.unwrap_or(10).min(50) as usize;
-        let state = self.app_handle.state::<AppState>();
-        let mut client = state.tidal_client.lock().await;
+        let state = &*self.host;
+        let mut client = state.tidal_client().lock().await;
 
         // Fetch the track detail to get the TRACK_MIX mix ID from the `mixes` field.
         let track_detail = client
@@ -131,9 +129,9 @@ impl SoneMcpServer {
         Parameters(ArtistTopTracksArgs { artist_id, limit }): Parameters<ArtistTopTracksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let limit = limit.unwrap_or(10).min(50);
-        let state = self.app_handle.state::<AppState>();
+        let state = &*self.host;
         let tracks = state
-            .tidal_client
+            .tidal_client()
             .lock()
             .await
             .get_artist_top_tracks(artist_id, limit)
@@ -155,10 +153,10 @@ impl SoneMcpServer {
         &self,
         Parameters(AlbumTracksArgs { album_id }): Parameters<AlbumTracksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
+        let state = &*self.host;
         // Request up to 200 tracks (full album); offset 0 is sufficient for standard albums.
         let paginated = state
-            .tidal_client
+            .tidal_client()
             .lock()
             .await
             .get_album_tracks(album_id, 0, 200)
@@ -180,9 +178,9 @@ impl SoneMcpServer {
         &self,
         Parameters(LyricsArgs { track_id }): Parameters<LyricsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let state = self.app_handle.state::<AppState>();
+        let state = &*self.host;
         let lyrics = state
-            .tidal_client
+            .tidal_client()
             .lock()
             .await
             .get_track_lyrics(track_id)

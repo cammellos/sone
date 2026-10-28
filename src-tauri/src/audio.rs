@@ -6,7 +6,6 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use tauri::Emitter;
 
 /// Read the real GStreamer registry.
 ///
@@ -1062,7 +1061,7 @@ fn configure_alsa_hwparams(
 fn spawn_alsa_writer(
     device: &str,
     initial_format: &PcmFormat,
-    app_handle: tauri::AppHandle,
+    app_handle: crate::events::EventSink,
     tearing_down: Arc<AtomicBool>,
     frames_written: Arc<AtomicU64>,
     current_sample_rate: Arc<AtomicU32>,
@@ -1749,7 +1748,7 @@ pub struct AudioPlayer {
 
 impl AudioPlayer {
     pub fn new(
-        app_handle: tauri::AppHandle,
+        app_handle: crate::events::EventSink,
         signal_path: Arc<SignalPathTracker>,
         proxy_settings: crate::ProxySettings,
     ) -> Self {

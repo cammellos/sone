@@ -3,7 +3,6 @@ use rmcp::model::CallToolResult;
 use rmcp::schemars::JsonSchema;
 use rmcp::{ErrorData, tool_router};
 use serde::Deserialize;
-use tauri::Emitter;
 
 use crate::mcp::events::{
     EV_CLEAR_QUEUE, EV_PAUSE, EV_PLAY_SOURCE, EV_PLAY_TRACKS, EV_REMOVE_FROM_QUEUE, EV_RESUME,
@@ -75,7 +74,7 @@ impl SoneMcpServer {
             ));
         }
         let action = args.action.clone();
-        self.app_handle
+        self.host.sink()
             .emit(EV_PLAY_TRACKS, PlayTracksPayload { track_ids: args.track_ids, action: args.action })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": action });
@@ -96,7 +95,7 @@ impl SoneMcpServer {
                 None,
             ));
         }
-        self.app_handle
+        self.host.sink()
             .emit(EV_PLAY_SOURCE, PlaySourcePayload { source_type: args.source_type, id: args.id })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "playing" });
@@ -117,7 +116,7 @@ impl SoneMcpServer {
                 None,
             ));
         }
-        self.app_handle
+        self.host.sink()
             .emit(EV_SHUFFLE_SOURCE, PlaySourcePayload { source_type: args.source_type, id: args.id })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "shuffling" });
@@ -126,7 +125,7 @@ impl SoneMcpServer {
 
     #[rmcp::tool(name = "pause", description = "Pause playback.")]
     async fn pause(&self, Parameters(_): Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_PAUSE, ())
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -135,7 +134,7 @@ impl SoneMcpServer {
 
     #[rmcp::tool(name = "resume", description = "Resume playback.")]
     async fn resume(&self, Parameters(_): Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_RESUME, ())
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -147,7 +146,7 @@ impl SoneMcpServer {
         &self,
         Parameters(_): Parameters<NoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_SKIP_NEXT, ())
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -159,7 +158,7 @@ impl SoneMcpServer {
         &self,
         Parameters(_): Parameters<NoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_SKIP_PREVIOUS, ())
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -171,7 +170,7 @@ impl SoneMcpServer {
         &self,
         Parameters(_): Parameters<NoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_CLEAR_QUEUE, ())
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -183,7 +182,7 @@ impl SoneMcpServer {
         &self,
         Parameters(_): Parameters<NoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_TOGGLE_SHUFFLE, ())
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -198,7 +197,7 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<SeekArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_SEEK, SeekPayload { position_seconds: args.position_seconds })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "seeking" });
@@ -214,7 +213,7 @@ impl SoneMcpServer {
         Parameters(args): Parameters<VolumeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let level = args.level.clamp(0.0, 1.0);
-        self.app_handle
+        self.host.sink()
             .emit(EV_SET_VOLUME, VolumePayload { level })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "ok" });
@@ -229,7 +228,7 @@ impl SoneMcpServer {
         &self,
         Parameters(args): Parameters<RemoveFromQueueArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.app_handle
+        self.host.sink()
             .emit(EV_REMOVE_FROM_QUEUE, RemoveFromQueuePayload { track_id: args.track_id })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": "removed" });
@@ -251,7 +250,7 @@ impl SoneMcpServer {
             ));
         }
         let mode = args.mode.clone();
-        self.app_handle
+        self.host.sink()
             .emit(EV_SET_REPEAT, RepeatPayload { mode: args.mode })
             .map_err(|e| ErrorData::internal_error(format!("emit failed: {e}"), None))?;
         let json = serde_json::json!({ "status": mode });
