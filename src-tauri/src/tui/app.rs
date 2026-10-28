@@ -166,6 +166,8 @@ pub enum Expect {
     Settings,
     /// `rename_playlist`: the playlist's uuid and new title.
     Renamed,
+    /// `delete_playlist`: the deleted playlist's uuid.
+    Deleted,
 }
 
 pub struct App {
@@ -194,6 +196,8 @@ pub struct App {
     pub settings: Option<SettingsPage>,
     /// The playlist (uuid, current title) the Rename prompt is for.
     renaming: Option<(String, String)>,
+    /// `dd` once on this playlist: the next `dd` on it deletes it.
+    confirm_delete: Option<String>,
     expecting: HashMap<u64, Expect>,
 }
 
@@ -220,6 +224,7 @@ impl App {
             open_url: None,
             settings: None,
             renaming: None,
+            confirm_delete: None,
             expecting: HashMap::new(),
         }
     }
@@ -336,6 +341,14 @@ impl App {
                 let (uuid, title) = (str_of(&v["uuid"]), str_of(&v["title"]));
                 self.retitle_playlist(&uuid, &title);
                 self.info(format!("renamed to {title}"));
+            }
+            Expect::Deleted => {
+                let uuid = str_of(&v["uuid"]);
+                for view in self.stacks.iter_mut().flatten() {
+                    view.rows.retain(|r| !matches!(r, Row::Playlist { uuid: id, .. } if *id == uuid));
+                    view.selected = view.selected.min(view.rows.len().saturating_sub(1));
+                }
+                self.info("playlist deleted");
             }
             Expect::LoginFinish => {
                 self.apply_status(&v);
@@ -501,6 +514,7 @@ impl App {
     }
 
     fn do_action(&mut self, action: Action) {
+        let confirming_delete = self.confirm_delete.take();
         if self.settings.is_some() && self.settings_action(action) {
             return;
         }
@@ -519,7 +533,7 @@ impl App {
             Action::PlaySelected => self.activate(),
             Action::AddToQueue => self.enqueue_selected("queue"),
             Action::PlayNext => self.enqueue_selected("play_next"),
-            Action::RemoveSelected => self.remove_selected(),
+            Action::RemoveSelected => self.remove_selected(confirming_delete),
             Action::Rename => self.start_rename(),
             Action::Back => {
                 if self.stacks[self.tab].len() > 1 {
@@ -619,7 +633,21 @@ impl App {
         }
     }
 
-    fn remove_selected(&mut self) {
+    /// `dd`: drop an upcoming track from the queue, or delete a playlist
+    /// once it's pressed twice on it (Tidal has no undo).
+    fn remove_selected(&mut self, confirming_delete: Option<String>) {
+        if let Some(Row::Playlist { uuid, title, .. }) = self.selected_row() {
+            let (uuid, title) = (uuid.clone(), title.clone());
+            if confirming_delete.as_ref() == Some(&uuid) {
+                self.info(format!("deleting {title}…"));
+                self.request("delete_playlist", json!({ "uuid": uuid }), Expect::Deleted);
+            } else {
+                let key = self.config.keymap.describe(Action::RemoveSelected).unwrap_or_default();
+                self.error(format!("delete playlist \"{title}\"? {key} again to confirm"));
+                self.confirm_delete = Some(uuid);
+            }
+            return;
+        }
         if self.tab != QUEUE {
             return;
         }
@@ -1069,6 +1097,28 @@ mod tests {
         app.outbox.clear();
         press(&mut app, "r<C-u>Third<CR>");
         assert_eq!(sent_cmds(&app), vec![("rename_playlist", json!({ "uuid": "u2", "name": "Third" }))]);
+    }
+
+    #[test]
+    fn dd_twice_deletes_a_playlist_and_other_keys_cancel() {
+        let mut app = app_with_queue(1);
+        press(&mut app, ",o");
+        answer_last(
+            &mut app,
+            json!({ "playlists": [{ "uuid": "u1", "title": "One", "tracks": 3 }, { "uuid": "u2", "title": "Two", "tracks": 5 }] }),
+        );
+        press(&mut app, "ndd");
+        assert!(app.outbox.is_empty());
+        assert!(app.message.as_ref().unwrap().text.contains("Two"));
+        // moving cancels, and the confirmation is per playlist
+        press(&mut app, "eddndd");
+        assert!(app.outbox.is_empty());
+        press(&mut app, "dd");
+        assert_eq!(sent_cmds(&app), vec![("delete_playlist", json!({ "uuid": "u2" }))]);
+        answer_last(&mut app, json!({ "uuid": "u2" }));
+        let titles: Vec<_> = app.view().unwrap().rows.iter().map(|r| format!("{r:?}")).collect();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(app.view().unwrap().selected, 0);
     }
 
     #[test]

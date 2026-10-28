@@ -390,6 +390,11 @@ impl Daemon {
                 return Ok(self.settings_json().await);
             }
             "playlists" => return self.playlists().await,
+            "delete_playlist" => {
+                let uuid = arg_str(args, "uuid")?;
+                self.delete_playlist(uuid).await?;
+                return Ok(json!({ "uuid": uuid }));
+            }
             "rename_playlist" => {
                 let name = arg_str(args, "name")?.trim();
                 if name.is_empty() {
@@ -764,6 +769,23 @@ impl Daemon {
             .map(|p| playlist_json(&p))
             .collect();
         Ok(json!({ "playlists": playlists }))
+    }
+
+    /// Delete a playlist for good, as the app does
+    /// (`commands::library::delete_playlist`).
+    async fn delete_playlist(&self, uuid: &str) -> Result<(), SoneError> {
+        let client = self.engine.tidal_client.lock().await;
+        client.delete_playlist(uuid).await?;
+        let user_id = client.tokens.as_ref().and_then(|t| t.user_id);
+        drop(client);
+        log::info!("[daemon] deleted playlist {uuid}");
+        let cache = &self.engine.disk_cache;
+        if let Some(uid) = user_id {
+            cache.invalidate_tag(&format!("user:{uid}")).await;
+        }
+        cache.invalidate_tag(&format!("playlist:{uuid}")).await;
+        cache.invalidate_tag("folders").await;
+        Ok(())
     }
 
     /// Rename a playlist, keeping its description and visibility, as the

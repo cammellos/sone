@@ -30,6 +30,7 @@ const USAGE: &str = "usage: sonectl <command>
                               exclusive_mode on|off, bit_perfect on|off, exclusive_device <id>
   playlists                   your playlists (uuid, tracks, title)
   rename <uuid> <name>        rename one of your playlists
+  delete <uuid>               delete one of your playlists (no undo)
   search <query>              tracks, albums, artists and playlists
   watch                       print state changes as JSON lines
   raw <cmd> [json args]       send any daemon command";
@@ -207,6 +208,7 @@ fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         ),
         ["clear"] => ("clear_queue", Value::Null, print_status),
         ["playlists"] => ("playlists", Value::Null, print_playlists),
+        ["delete", uuid] => ("delete_playlist", json!({ "uuid": uuid }), print_deleted),
         ["rename", uuid, name @ ..] if !name.is_empty() => (
             "rename_playlist",
             json!({ "uuid": uuid, "name": name.join(" ") }),
@@ -289,6 +291,10 @@ fn print_playlists(v: &Value) {
             p["title"].as_str().unwrap_or("?")
         );
     }
+}
+
+fn print_deleted(v: &Value) {
+    println!("deleted {}", v["uuid"].as_str().unwrap_or("?"));
 }
 
 fn print_renamed(v: &Value) {
