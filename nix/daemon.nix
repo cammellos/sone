@@ -8,6 +8,7 @@
   glib-networking,
   alsa-lib,
   libpulseaudio,
+  pipewire,
   gst_all_1,
   src,
 }:
@@ -50,6 +51,9 @@ rustPlatform.buildRustPackage {
     glib-networking
     alsa-lib
     libpulseaudio
+    # Its GStreamer device provider is what lists the output devices
+    # (`audio::list_alsa_devices`).
+    pipewire
     gst_all_1.gstreamer
     gst_all_1.gst-plugins-base
     gst_all_1.gst-plugins-good

@@ -103,6 +103,42 @@ pub struct Message {
     pub error: bool,
 }
 
+/// A line of the settings page (`;settings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Header(&'static str),
+    MaxQuality,
+    Gapless,
+    ExclusiveMode,
+    BitPerfect,
+    Device,
+    Account,
+}
+
+pub const SETTING_ROWS: &[Setting] = &[
+    Setting::Header("Audio"),
+    Setting::MaxQuality,
+    Setting::Gapless,
+    Setting::ExclusiveMode,
+    Setting::BitPerfect,
+    Setting::Device,
+    Setting::Header("Account"),
+    Setting::Account,
+];
+
+const QUALITIES: &[&str] = &["HI_RES_LOSSLESS", "LOSSLESS", "HIGH"];
+
+/// The settings page: opened from the command line, shown in place of the
+/// current tab until `<BS>` or a tab switch.
+#[derive(Debug, Clone, Default)]
+pub struct SettingsPage {
+    /// The daemon's `settings` reply; Null while loading.
+    pub values: Value,
+    pub selected: usize,
+    /// `<CR>` on "Log out" once: the next `<CR>` there logs out.
+    pub confirm_logout: bool,
+}
+
 pub const TABS: &[&str] = &["Queue", "Playlists", "Search"];
 pub const QUEUE: usize = 0;
 pub const PLAYLISTS: usize = 1;
@@ -124,6 +160,8 @@ pub enum Expect {
     LoginStart,
     /// `login_finish`: the status once logged in.
     LoginFinish,
+    /// `settings` / `set_setting`: the settings page's values.
+    Settings,
 }
 
 pub struct App {
@@ -149,6 +187,7 @@ pub struct App {
     pub outbox: Vec<(&'static str, Value, Expect)>,
     /// A page to open in the browser; the event loop runs xdg-open.
     pub open_url: Option<String>,
+    pub settings: Option<SettingsPage>,
     expecting: HashMap<u64, Expect>,
 }
 
@@ -173,6 +212,7 @@ impl App {
             last_query: None,
             outbox: Vec::new(),
             open_url: None,
+            settings: None,
             expecting: HashMap::new(),
         }
     }
@@ -280,6 +320,11 @@ impl App {
                 self.open_url = v["url"].as_str().map(str::to_string);
                 self.mode = Mode::Prompt(PromptKind::Login, String::new());
             }
+            Expect::Settings => {
+                if let Some(page) = &mut self.settings {
+                    page.values = v;
+                }
+            }
             Expect::LoginFinish => {
                 self.apply_status(&v);
                 self.info("logged in");
@@ -384,6 +429,7 @@ impl App {
     }
 
     fn search(&mut self, query: &str) {
+        self.settings = None;
         self.tab = SEARCH;
         self.last_query = Some(query.to_string());
         self.stacks[SEARCH] = vec![View::loading(format!("/{query}"))];
@@ -437,6 +483,9 @@ impl App {
     }
 
     fn do_action(&mut self, action: Action) {
+        if self.settings.is_some() && self.settings_action(action) {
+            return;
+        }
         let half = (self.list_height / 2).max(1) as isize;
         match action {
             Action::Down => self.move_by(1),
@@ -470,6 +519,7 @@ impl App {
     }
 
     fn switch_tab(&mut self, tab: usize) {
+        self.settings = None;
         self.tab = tab;
         if tab == PLAYLISTS && self.stacks[PLAYLISTS].is_empty() {
             self.load_playlists();
@@ -579,12 +629,84 @@ impl App {
         self.send("volume", json!({ "level": level }));
     }
 
+    // ---- settings page ----------------------------------------------------
+
+    /// Keys on the settings page. Returns false for the actions it leaves to
+    /// the normal handling (playback, volume, tabs, command line, quit).
+    fn settings_action(&mut self, action: Action) -> bool {
+        let Some(page) = self.settings.as_mut() else { return false };
+        let confirming = std::mem::take(&mut page.confirm_logout);
+        let selectable: Vec<usize> =
+            (0..SETTING_ROWS.len()).filter(|&i| !matches!(SETTING_ROWS[i], Setting::Header(_))).collect();
+        let at = selectable.iter().position(|&i| i == page.selected).unwrap_or(0) as isize;
+        let move_to = |delta: isize| selectable[(at + delta).clamp(0, selectable.len() as isize - 1) as usize];
+        match action {
+            Action::Down | Action::HalfPageDown => page.selected = move_to(1),
+            Action::Up | Action::HalfPageUp => page.selected = move_to(-1),
+            Action::Top => page.selected = move_to(isize::MIN / 2),
+            Action::Bottom => page.selected = move_to(isize::MAX / 2),
+            Action::Back => self.settings = None,
+            Action::PlaySelected => {
+                let row = SETTING_ROWS[page.selected];
+                self.change_setting(row, confirming);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn change_setting(&mut self, row: Setting, confirming: bool) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let v = page.values.clone();
+        if v.is_null() && row != Setting::Account {
+            return;
+        }
+        let flip = |key: &str| !v[key].as_bool().unwrap_or(false);
+        let (name, value) = match row {
+            Setting::Header(_) => return,
+            Setting::MaxQuality => {
+                let current = v["maxQuality"].as_str().unwrap_or("");
+                let i = QUALITIES.iter().position(|q| *q == current).map_or(0, |i| i + 1);
+                ("max_quality", json!(QUALITIES[i % QUALITIES.len()]))
+            }
+            Setting::Gapless => ("gapless", json!(flip("gapless"))),
+            Setting::ExclusiveMode => ("exclusive_mode", json!(flip("exclusiveMode"))),
+            Setting::BitPerfect => ("bit_perfect", json!(flip("bitPerfect"))),
+            Setting::Device => {
+                let ids: Vec<&str> = v["devices"].as_array().into_iter().flatten().filter_map(|d| d["id"].as_str()).collect();
+                if ids.is_empty() {
+                    return self.error("no output devices found");
+                }
+                let current = v["exclusiveDevice"].as_str();
+                let i = ids.iter().position(|d| Some(*d) == current).map_or(0, |i| i + 1);
+                ("exclusive_device", json!(ids[i % ids.len()]))
+            }
+            Setting::Account if !self.status.logged_in => {
+                return self.request("login_start", Value::Null, Expect::LoginStart);
+            }
+            Setting::Account if confirming => {
+                self.send("logout", Value::Null);
+                return self.info("logged out");
+            }
+            Setting::Account => {
+                page.confirm_logout = true;
+                let key = self.config.keymap.describe(Action::PlaySelected).unwrap_or_default();
+                return self.info(format!("log out of Tidal? {key} again to confirm"));
+            }
+        };
+        self.request("set_setting", json!({ "name": name, "value": value }), Expect::Settings);
+    }
+
     // ---- command line -----------------------------------------------------
 
     fn run_command(&mut self, line: &str) {
         match parse_command(line) {
             Ok(Command::Quit) => self.quit = true,
             Ok(Command::Login) => self.request("login_start", Value::Null, Expect::LoginStart),
+            Ok(Command::Settings) => {
+                self.settings = Some(SettingsPage { selected: 1, ..Default::default() });
+                self.request("settings", Value::Null, Expect::Settings);
+            }
             Ok(Command::Refresh) => match self.tab {
                 QUEUE => self.refresh_queue(),
                 PLAYLISTS => self.load_playlists(),
@@ -690,6 +812,7 @@ fn artist_rows(v: &Value) -> Vec<Row> {
 enum Command {
     Quit,
     Login,
+    Settings,
     Refresh,
     Send(&'static str, Value),
 }
@@ -707,6 +830,7 @@ fn parse_command(line: &str) -> Result<Command, String> {
         ["q"] | ["quit"] => Ok(Command::Quit),
         ["r"] | ["refresh"] => Ok(Command::Refresh),
         ["login"] => Ok(Command::Login),
+        ["settings"] | ["set"] => Ok(Command::Settings),
         ["play", rest @ ..] => send("play_source", source(rest)?),
         ["shuffle-play", rest @ ..] => send("shuffle_source", source(rest)?),
         ["repeat", m @ ("off" | "all" | "one")] => send("repeat", json!({ "mode": m })),
@@ -1040,5 +1164,62 @@ mod tests {
         app.message = None;
         app.on_event("state", &status);
         assert!(app.message.is_none(), "not repeated on every state event");
+    }
+
+    fn app_with_settings() -> App {
+        let mut app = app_with_queue(1);
+        app.on_event("state", &json!({ "state": "stopped", "loggedIn": true }));
+        app.outbox.clear();
+        press(&mut app, ";settings<CR>");
+        assert_eq!(sent_cmds(&app), vec![("settings", Value::Null)]);
+        answer_last(
+            &mut app,
+            json!({
+                "maxQuality": "LOSSLESS", "gapless": true, "exclusiveMode": false, "bitPerfect": false,
+                "exclusiveDevice": "hw:1", "devices": [{ "id": "hw:1", "name": "a" }, { "id": "hw:2", "name": "b" }],
+                "loggedIn": true
+            }),
+        );
+        app
+    }
+
+    #[test]
+    fn settings_page_toggles_and_cycles() {
+        let mut app = app_with_settings();
+        assert_eq!(app.settings.as_ref().unwrap().selected, 1, "starts on the first setting, not the header");
+        press(&mut app, "<CR>n<CR>nnn<CR>");
+        assert_eq!(
+            sent_cmds(&app),
+            vec![
+                ("set_setting", json!({ "name": "max_quality", "value": "HIGH" })),
+                ("set_setting", json!({ "name": "gapless", "value": false })),
+                ("set_setting", json!({ "name": "exclusive_device", "value": "hw:2" })),
+            ]
+        );
+        // n past the last device skips the "Account" header
+        press(&mut app, "n");
+        assert_eq!(SETTING_ROWS[app.settings.as_ref().unwrap().selected], Setting::Account);
+    }
+
+    #[test]
+    fn logout_needs_a_second_enter_and_other_keys_cancel() {
+        let mut app = app_with_settings();
+        press(&mut app, "G<CR>");
+        assert!(app.outbox.is_empty());
+        press(&mut app, "e<CR>");
+        app.outbox.clear();
+        press(&mut app, "n<CR><CR>");
+        assert_eq!(sent_cmds(&app).last().unwrap(), &("logout", Value::Null));
+    }
+
+    #[test]
+    fn back_or_tab_switch_closes_settings() {
+        let mut app = app_with_settings();
+        press(&mut app, "<BS>");
+        assert!(app.settings.is_none());
+        let mut app = app_with_settings();
+        press(&mut app, ",o");
+        assert!(app.settings.is_none());
+        assert_eq!(app.tab, PLAYLISTS);
     }
 }

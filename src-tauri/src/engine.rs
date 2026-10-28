@@ -2,8 +2,9 @@
 //! settings SONE already stores. Used by the headless daemon (`soned`); the
 //! GUI builds the same parts inside `AppState::new`.
 //!
-//! The engine writes settings only to save a login (`login`) and refreshed
-//! auth tokens, and runs no migrations: changing settings stays the GUI's job.
+//! The engine writes settings to save a login, a logout, refreshed auth
+//! tokens and the few settings the daemon changes (`update_settings`). It
+//! runs no migrations: that stays the GUI's job.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,7 +45,8 @@ pub struct Engine {
     /// The GUI's cache directory: playlist edits made here invalidate the
     /// entries the GUI would otherwise show stale.
     pub disk_cache: DiskCache,
-    pub settings: Settings,
+    /// What settings.json holds; `update_settings` changes both.
+    settings: std::sync::Mutex<Settings>,
     settings_path: PathBuf,
     crypto: Arc<Crypto>,
 }
@@ -106,7 +108,7 @@ impl Engine {
             tidal_client: Mutex::new(client),
             signal_path,
             disk_cache,
-            settings,
+            settings: std::sync::Mutex::new(settings),
             settings_path,
             crypto,
         })
@@ -135,14 +137,43 @@ impl Engine {
         }
         drop(client);
 
-        let mut settings = read_settings(&self.settings_path, &self.crypto).unwrap_or_default();
-        settings.auth_tokens = Some(tokens);
-        settings.auth_method = AuthMethod::Pkce;
-        settings.legacy_auth_notice_count = 0;
-        settings.client_id = String::new();
-        settings.client_secret = String::new();
-        let json = serde_json::to_string_pretty(&settings)?;
+        self.update_settings(|s| {
+            s.auth_tokens = Some(tokens.clone());
+            s.auth_method = AuthMethod::Pkce;
+            s.legacy_auth_notice_count = 0;
+            s.client_id = String::new();
+            s.client_secret = String::new();
+        })
+    }
+
+    /// Forget the login, as the app's logout does for what the engine has:
+    /// the session, the saved tokens and the cache. Other settings stay.
+    pub async fn logout(&self) -> Result<(), SoneError> {
+        {
+            let mut client = self.tidal_client.lock().await;
+            client.tokens = None;
+            client.country_code = "US".to_string();
+        }
+        self.update_settings(|s| {
+            s.auth_tokens = None;
+            s.last_track_id = None;
+        })?;
+        self.disk_cache.clear().await;
+        Ok(())
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    /// Change settings and save them. The file is re-read first, so tokens
+    /// the client refreshed and saved meanwhile are kept.
+    pub fn update_settings(&self, change: impl Fn(&mut Settings)) -> Result<(), SoneError> {
+        let mut stored = read_settings(&self.settings_path, &self.crypto).unwrap_or_default();
+        change(&mut stored);
+        let json = serde_json::to_string_pretty(&stored)?;
         fs::write(&self.settings_path, self.crypto.encrypt(json.as_bytes())?)?;
+        change(&mut self.settings.lock().unwrap());
         Ok(())
     }
 
@@ -153,10 +184,11 @@ impl Engine {
         track_id: u64,
         use_track_gain: bool,
     ) -> Result<ResolvedStream, SoneError> {
+        let settings = self.settings();
         crate::stream::resolve(
             &self.tidal_client,
-            &self.settings.max_quality,
-            self.settings.volume_normalization,
+            &settings.max_quality,
+            settings.volume_normalization,
             track_id,
             use_track_gain,
         )

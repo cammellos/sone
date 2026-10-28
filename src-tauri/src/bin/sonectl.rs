@@ -24,6 +24,10 @@ const USAGE: &str = "usage: sonectl <command>
   remove <track id>           drop it from the upcoming tracks
   clear                       drop all upcoming tracks
   login                       sign in to Tidal in the browser
+  logout                      forget the login (stops playback)
+  settings                    quality, gapless, exclusive mode, output devices
+  set <name> <value>          max_quality HI_RES_LOSSLESS|LOSSLESS|HIGH, gapless on|off,
+                              exclusive_mode on|off, bit_perfect on|off, exclusive_device <id>
   playlists                   your playlists (uuid, tracks, title)
   search <query>              tracks, albums, artists and playlists
   watch                       print state changes as JSON lines
@@ -202,6 +206,16 @@ fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         ),
         ["clear"] => ("clear_queue", Value::Null, print_status),
         ["playlists"] => ("playlists", Value::Null, print_playlists),
+        ["logout"] => ("logout", Value::Null, print_status),
+        ["settings"] => ("settings", Value::Null, print_settings),
+        ["set", name, value] => {
+            let value = match *value {
+                "on" | "true" => json!(true),
+                "off" | "false" => json!(false),
+                v => json!(v),
+            };
+            ("set_setting", json!({ "name": name, "value": value }), print_settings)
+        }
         ["search", q @ ..] if !q.is_empty() => ("search", json!({ "query": q.join(" ") }), print_search),
         ["watch"] => ("subscribe", Value::Null, print_json),
         ["raw", cmd] => (cmd, Value::Null, print_json),
@@ -300,6 +314,19 @@ fn print_search(v: &Value) {
     section("Playlists", "playlists", &|p| {
         format!("{}  {}", p["uuid"].as_str().unwrap_or("?"), p["title"].as_str().unwrap_or("?"))
     });
+}
+
+fn print_settings(v: &Value) {
+    let on = |key: &str| if v[key] == json!(true) { "on" } else { "off" };
+    println!("max_quality       {}", v["maxQuality"].as_str().unwrap_or("?"));
+    println!("gapless           {}", on("gapless"));
+    println!("exclusive_mode    {}", on("exclusiveMode"));
+    println!("bit_perfect       {}", on("bitPerfect"));
+    println!("exclusive_device  {}", v["exclusiveDevice"].as_str().unwrap_or("(default)"));
+    for d in v["devices"].as_array().into_iter().flatten() {
+        println!("  {:<24} {}", d["id"].as_str().unwrap_or("?"), d["name"].as_str().unwrap_or(""));
+    }
+    println!("logged in         {}", if v["loggedIn"] == json!(true) { "yes" } else { "no" });
 }
 
 fn print_json(v: &Value) {

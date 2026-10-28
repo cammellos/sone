@@ -53,6 +53,8 @@ pub struct Daemon {
     logged_in: AtomicBool,
     /// The PKCE login `login_start` began: (code verifier, client unique key).
     pending_login: Mutex<Option<(String, String)>>,
+    /// Output devices for exclusive mode, probed on the first `settings`.
+    devices: std::sync::OnceLock<Vec<crate::audio::AudioDevice>>,
 }
 
 #[derive(Deserialize)]
@@ -77,7 +79,7 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
         let _ = engine_tx.send((name.to_string(), payload));
     });
     let engine = Engine::new(sink, config_dir).await?;
-    let volume = engine.settings.volume;
+    let volume = engine.settings().volume;
     let logged_in = AtomicBool::new(engine.logged_in().await);
     let (events, _) = broadcast::channel(64);
     let daemon = Arc::new(Daemon {
@@ -90,6 +92,7 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
         events,
         logged_in,
         pending_login: Mutex::new(None),
+        devices: std::sync::OnceLock::new(),
     });
 
     // Audio engine events drive the queue.
@@ -157,7 +160,7 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
 /// Serve the same MCP tools as the GUI, on the port and token stored in
 /// SONE's settings, when MCP is enabled there.
 async fn start_mcp(daemon: &Arc<Daemon>) -> Option<crate::mcp::McpHandle> {
-    let settings = &daemon.engine.settings;
+    let settings = daemon.engine.settings();
     if !settings.mcp_enabled || settings.mcp_token.is_empty() {
         log::info!("[daemon] MCP disabled in settings");
         return None;
@@ -368,6 +371,24 @@ impl Daemon {
                 log::info!("[daemon] logged in");
                 self.publish_state().await;
             }
+            "logout" => {
+                self.stop().await;
+                {
+                    let mut p = self.player.lock().await;
+                    let repeat = p.queue.repeat();
+                    p.queue = Queue::default();
+                    p.queue.set_repeat(repeat);
+                }
+                self.engine.logout().await?;
+                self.logged_in.store(false, Ordering::Relaxed);
+                log::info!("[daemon] logged out");
+                self.publish_state().await;
+            }
+            "settings" => return Ok(self.settings_json().await),
+            "set_setting" => {
+                self.set_setting(arg_str(args, "name")?, &args["value"]).await?;
+                return Ok(self.settings_json().await);
+            }
             "playlists" => return self.playlists().await,
             "source_tracks" => {
                 let source_type = arg_str(args, "source_type")?;
@@ -545,7 +566,7 @@ impl Daemon {
     async fn arm_next(&self) {
         let audio = &self.engine.audio_player;
         let _ = audio.clear_next_track();
-        if !self.engine.settings.gapless {
+        if !self.engine.settings().gapless {
             return;
         }
         let next = {
@@ -634,6 +655,86 @@ impl Daemon {
 
     fn publish(&self, event: &str, data: Value) {
         let _ = self.events.send(json!({ "event": event, "data": data }).to_string());
+    }
+
+    /// The settings sonetui's settings page shows and changes.
+    async fn settings_json(&self) -> Value {
+        if self.devices.get().is_none() {
+            let probed = tokio::task::spawn_blocking(crate::audio::list_alsa_devices)
+                .await
+                .ok()
+                .and_then(|r| r.map_err(|e| log::warn!("[daemon] listing audio devices: {e}")).ok())
+                .unwrap_or_default();
+            let _ = self.devices.set(probed);
+        }
+        let s = self.engine.settings();
+        json!({
+            "maxQuality": s.max_quality,
+            "gapless": s.gapless,
+            "exclusiveMode": s.exclusive_mode,
+            "bitPerfect": s.bit_perfect,
+            "exclusiveDevice": s.exclusive_device,
+            "devices": self.devices.get(),
+            "loggedIn": self.logged_in.load(Ordering::Relaxed),
+        })
+    }
+
+    /// Change one setting, applying it to the audio engine the way the app's
+    /// setters do (commands/utility.rs), and save it.
+    async fn set_setting(&self, name: &str, value: &Value) -> Result<(), SoneError> {
+        let audio = &self.engine.audio_player;
+        let flag = || value.as_bool().ok_or_else(|| SoneError::Parse(format!("{name} takes true or false")));
+        let text = || value.as_str().ok_or_else(|| SoneError::Parse(format!("{name} takes a string")));
+        let device = self.engine.settings().exclusive_device;
+        match name {
+            "max_quality" => {
+                let q = text()?.to_string();
+                if !matches!(q.as_str(), "HI_RES_LOSSLESS" | "LOSSLESS" | "HIGH") {
+                    return Err(SoneError::Parse(format!("max_quality: HI_RES_LOSSLESS, LOSSLESS or HIGH, not {q}")));
+                }
+                self.engine.update_settings(|s| s.max_quality = q.clone())?;
+            }
+            "gapless" => {
+                let on = flag()?;
+                audio.set_gapless(on).map_err(SoneError::Audio)?;
+                self.engine.update_settings(|s| s.gapless = on)?;
+                self.arm_next().await;
+            }
+            "exclusive_mode" => {
+                let on = flag()?;
+                if !on {
+                    audio.set_bit_perfect(false).map_err(SoneError::Audio)?;
+                }
+                audio.set_exclusive_mode(on, device).map_err(SoneError::Audio)?;
+                self.engine.update_settings(|s| {
+                    s.exclusive_mode = on;
+                    s.bit_perfect &= on;
+                })?;
+            }
+            "bit_perfect" => {
+                let on = flag()?;
+                if on {
+                    audio.set_exclusive_mode(true, device).map_err(SoneError::Audio)?;
+                }
+                audio.set_bit_perfect(on).map_err(SoneError::Audio)?;
+                self.engine.update_settings(|s| {
+                    s.bit_perfect = on;
+                    s.exclusive_mode |= on;
+                })?;
+            }
+            "exclusive_device" => {
+                let dev = text()?.to_string();
+                let enabled = self.engine.settings().exclusive_mode;
+                audio.set_exclusive_mode(enabled, Some(dev.clone())).map_err(SoneError::Audio)?;
+                self.engine.update_settings(|s| s.exclusive_device = Some(dev.clone()))?;
+            }
+            other => {
+                return Err(SoneError::Parse(format!(
+                    "unknown setting {other} (max_quality, gapless, exclusive_mode, bit_perfect, exclusive_device)"
+                )))
+            }
+        }
+        Ok(())
     }
 
     /// The user's playlists: owned, then favourited, without duplicates.

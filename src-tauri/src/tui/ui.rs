@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use super::app::{App, Mode, PromptKind, Row, View, QUEUE, TABS};
+use super::app::{App, Mode, PromptKind, Row, Setting, View, QUEUE, SETTING_ROWS, TABS};
 use super::config::Colors;
 use super::keys::{Action, Key};
 
@@ -25,7 +25,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
 
     draw_tabline(app, frame, tabline);
     app.list_height = body.height as usize;
-    if app.tab == QUEUE {
+    if app.settings.is_some() {
+        draw_settings(app, frame, body);
+    } else if app.tab == QUEUE {
         draw_queue(app, frame, body);
     } else {
         draw_view(app, frame, body);
@@ -49,11 +51,11 @@ fn draw_tabline(app: &App, frame: &mut Frame, area: Rect) {
         })
         .collect();
     // Breadcrumb of the current tab's views: "One › Two".
-    let crumbs: Vec<&str> = app.stacks[app.tab]
-        .iter()
-        .map(|v| v.title.as_str())
-        .filter(|t| !t.is_empty())
-        .collect();
+    let crumbs: Vec<&str> = if app.settings.is_some() {
+        vec!["Settings"]
+    } else {
+        app.stacks[app.tab].iter().map(|v| v.title.as_str()).filter(|t| !t.is_empty()).collect()
+    };
     if !crumbs.is_empty() {
         spans.push(Span::styled(format!("  {}", crumbs.join(" › ")), Style::default().fg(c.text_header)));
     }
@@ -135,6 +137,52 @@ fn row_item<'a>(row: &Row, view: &View, width: usize, c: &Colors) -> ListItem<'a
         }
         Row::Artist { name, .. } => line_item(&format!("   {name}"), "artist", width, text),
     }
+}
+
+fn draw_settings(app: &App, frame: &mut Frame, area: Rect) {
+    let c = app.config.colors;
+    let Some(page) = &app.settings else { return };
+    let v = &page.values;
+    if v.is_null() {
+        return hint(app, frame, area, "loading…");
+    }
+    let on = |key: &str| if v[key].as_bool().unwrap_or(false) { "on" } else { "off" }.to_string();
+    let device = || {
+        let id = v["exclusiveDevice"].as_str();
+        let name = v["devices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|d| d["id"].as_str() == id)
+            .and_then(|d| d["name"].as_str());
+        match (name, id) {
+            (Some(n), Some(id)) => format!("{n} ({id})"),
+            (None, Some(id)) => id.to_string(),
+            _ => "default".to_string(),
+        }
+    };
+    let width = area.width as usize;
+    let text = Style::default().fg(c.text);
+    let items: Vec<ListItem> = SETTING_ROWS
+        .iter()
+        .map(|row| {
+            let (label, value) = match row {
+                Setting::Header(name) => {
+                    return ListItem::new(format!(" {name}"))
+                        .style(Style::default().fg(c.text_header).add_modifier(Modifier::BOLD))
+                }
+                Setting::MaxQuality => ("Max quality", v["maxQuality"].as_str().unwrap_or("?").to_string()),
+                Setting::Gapless => ("Gapless", on("gapless")),
+                Setting::ExclusiveMode => ("Exclusive mode", on("exclusiveMode")),
+                Setting::BitPerfect => ("Bit-perfect", on("bitPerfect")),
+                Setting::Device => ("Output device", device()),
+                Setting::Account if app.status.logged_in => ("Log out", String::new()),
+                Setting::Account => ("Log in", String::new()),
+            };
+            line_item(&format!("   {label}"), &value, width, text)
+        })
+        .collect();
+    render_list(frame, area, items, page.selected, &c);
 }
 
 fn render_list(frame: &mut Frame, area: Rect, items: Vec<ListItem>, selected: usize, c: &Colors) {
