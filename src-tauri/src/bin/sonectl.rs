@@ -29,6 +29,7 @@ const USAGE: &str = "usage: sonectl <command>
   set <name> <value>          max_quality HI_RES_LOSSLESS|LOSSLESS|HIGH, gapless on|off,
                               exclusive_mode on|off, bit_perfect on|off, exclusive_device <id>
   playlists                   your playlists (uuid, tracks, title)
+  rename <uuid> <name>        rename one of your playlists
   search <query>              tracks, albums, artists and playlists
   watch                       print state changes as JSON lines
   raw <cmd> [json args]       send any daemon command";
@@ -206,6 +207,11 @@ fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
         ),
         ["clear"] => ("clear_queue", Value::Null, print_status),
         ["playlists"] => ("playlists", Value::Null, print_playlists),
+        ["rename", uuid, name @ ..] if !name.is_empty() => (
+            "rename_playlist",
+            json!({ "uuid": uuid, "name": name.join(" ") }),
+            print_renamed,
+        ),
         ["logout"] => ("logout", Value::Null, print_status),
         ["settings"] => ("settings", Value::Null, print_settings),
         ["set", name, value] => {
@@ -283,6 +289,10 @@ fn print_playlists(v: &Value) {
             p["title"].as_str().unwrap_or("?")
         );
     }
+}
+
+fn print_renamed(v: &Value) {
+    println!("renamed to {}", v["title"].as_str().unwrap_or("?"));
 }
 
 fn print_search(v: &Value) {

@@ -91,6 +91,8 @@ pub enum PromptKind {
     Search,
     /// The address the browser ended on after signing in (`;login`).
     Login,
+    /// A playlist's new name (`renaming`).
+    Rename,
 }
 
 pub enum Mode {
@@ -162,6 +164,8 @@ pub enum Expect {
     LoginFinish,
     /// `settings` / `set_setting`: the settings page's values.
     Settings,
+    /// `rename_playlist`: the playlist's uuid and new title.
+    Renamed,
 }
 
 pub struct App {
@@ -188,6 +192,8 @@ pub struct App {
     /// A page to open in the browser; the event loop runs xdg-open.
     pub open_url: Option<String>,
     pub settings: Option<SettingsPage>,
+    /// The playlist (uuid, current title) the Rename prompt is for.
+    renaming: Option<(String, String)>,
     expecting: HashMap<u64, Expect>,
 }
 
@@ -213,6 +219,7 @@ impl App {
             outbox: Vec::new(),
             open_url: None,
             settings: None,
+            renaming: None,
             expecting: HashMap::new(),
         }
     }
@@ -324,6 +331,11 @@ impl App {
                 if let Some(page) = &mut self.settings {
                     page.values = v;
                 }
+            }
+            Expect::Renamed => {
+                let (uuid, title) = (str_of(&v["uuid"]), str_of(&v["title"]));
+                self.retitle_playlist(&uuid, &title);
+                self.info(format!("renamed to {title}"));
             }
             Expect::LoginFinish => {
                 self.apply_status(&v);
@@ -454,6 +466,7 @@ impl App {
                         PromptKind::Command => self.run_command(&line),
                         PromptKind::Search if line.trim().is_empty() => {}
                         PromptKind::Search => self.search(line.trim()),
+                        PromptKind::Rename => self.finish_rename(line.trim()),
                         PromptKind::Login if line.trim().is_empty() => {}
                         PromptKind::Login => {
                             self.info("logging in…");
@@ -471,6 +484,11 @@ impl App {
                     }
                 }
                 Key::Char(c) => line.push(c),
+                Key::Ctrl('u') => line.clear(),
+                Key::Ctrl('w') => {
+                    let kept = line.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                    line.truncate(kept);
+                }
                 _ => {}
             }
             return;
@@ -502,6 +520,7 @@ impl App {
             Action::AddToQueue => self.enqueue_selected("queue"),
             Action::PlayNext => self.enqueue_selected("play_next"),
             Action::RemoveSelected => self.remove_selected(),
+            Action::Rename => self.start_rename(),
             Action::Back => {
                 if self.stacks[self.tab].len() > 1 {
                     self.stacks[self.tab].pop();
@@ -612,6 +631,50 @@ impl App {
         if let Some(t) = self.upcoming.get(self.queue_selected - offset) {
             let id = t.id;
             self.send("remove", json!({ "track_id": id }));
+        }
+    }
+
+    /// `r`: rename the selected playlist, or the open one, from a prompt
+    /// that starts with its current title.
+    fn start_rename(&mut self) {
+        let target = match (self.selected_row(), self.view().and_then(|v| v.source.as_ref())) {
+            (Some(Row::Playlist { uuid, title, .. }), _) => Some((uuid.clone(), title.clone())),
+            (_, Some((kind, uuid))) if kind == "playlist" => {
+                Some((uuid.clone(), self.view().map(|v| v.title.clone()).unwrap_or_default()))
+            }
+            _ => None,
+        };
+        match target {
+            Some((uuid, title)) => {
+                self.mode = Mode::Prompt(PromptKind::Rename, title.clone());
+                self.renaming = Some((uuid, title));
+            }
+            None => self.error("select a playlist to rename"),
+        }
+    }
+
+    fn finish_rename(&mut self, name: &str) {
+        let Some((uuid, old)) = self.renaming.take() else { return };
+        if name.is_empty() || name == old {
+            return;
+        }
+        self.info("renaming…");
+        self.request("rename_playlist", json!({ "uuid": uuid, "name": name }), Expect::Renamed);
+    }
+
+    /// Show a playlist's new title wherever it's listed or open.
+    fn retitle_playlist(&mut self, uuid: &str, new_title: &str) {
+        for view in self.stacks.iter_mut().flatten() {
+            if view.source.as_ref().is_some_and(|(k, id)| k == "playlist" && id == uuid) {
+                view.title = new_title.to_string();
+            }
+            for row in &mut view.rows {
+                if let Row::Playlist { uuid: id, title, .. } = row {
+                    if id == uuid {
+                        *title = new_title.to_string();
+                    }
+                }
+            }
         }
     }
 
@@ -979,6 +1042,41 @@ mod tests {
         // the root view is never popped
         press(&mut app, "<BS>");
         assert_eq!(app.stacks[PLAYLISTS].len(), 1);
+    }
+
+    #[test]
+    fn r_renames_the_selected_or_open_playlist() {
+        let mut app = app_with_queue(1);
+        press(&mut app, ",o");
+        answer_last(
+            &mut app,
+            json!({ "playlists": [{ "uuid": "u1", "title": "One", "tracks": 3 }, { "uuid": "u2", "title": "Old name", "tracks": 5 }] }),
+        );
+        press(&mut app, "nr");
+        assert!(matches!(&app.mode, Mode::Prompt(PromptKind::Rename, t) if t == "Old name"));
+        // unchanged: nothing is sent
+        press(&mut app, "<CR>");
+        app.outbox.clear();
+        press(&mut app, "r<C-w>new<CR>");
+        assert_eq!(sent_cmds(&app), vec![("rename_playlist", json!({ "uuid": "u2", "name": "Old new" }))]);
+        // the open playlist's title follows too
+        press(&mut app, "<CR>");
+        answer_last(&mut app, json!({ "tracks": [track_json(10)] }));
+        reply(&mut app, Expect::Renamed, json!({ "uuid": "u2", "title": "Old new" }));
+        assert_eq!(app.view().unwrap().title, "Old new");
+        assert!(matches!(&app.stacks[PLAYLISTS][0].rows[1], Row::Playlist { title, .. } if title == "Old new"));
+        // inside it, r renames the open playlist
+        app.outbox.clear();
+        press(&mut app, "r<C-u>Third<CR>");
+        assert_eq!(sent_cmds(&app), vec![("rename_playlist", json!({ "uuid": "u2", "name": "Third" }))]);
+    }
+
+    #[test]
+    fn r_elsewhere_says_what_it_renames() {
+        let mut app = app_with_queue(1);
+        press(&mut app, "r");
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.message.as_ref().unwrap().error);
     }
 
     #[test]

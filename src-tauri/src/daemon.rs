@@ -390,6 +390,14 @@ impl Daemon {
                 return Ok(self.settings_json().await);
             }
             "playlists" => return self.playlists().await,
+            "rename_playlist" => {
+                let name = arg_str(args, "name")?.trim();
+                if name.is_empty() {
+                    return Err(SoneError::Parse("empty playlist name".into()));
+                }
+                self.rename_playlist(arg_str(args, "uuid")?, name).await?;
+                return Ok(json!({ "uuid": args["uuid"], "title": name }));
+            }
             "source_tracks" => {
                 let source_type = arg_str(args, "source_type")?;
                 let id = arg_str(args, "id")?;
@@ -756,6 +764,33 @@ impl Daemon {
             .map(|p| playlist_json(&p))
             .collect();
         Ok(json!({ "playlists": playlists }))
+    }
+
+    /// Rename a playlist, keeping its description and visibility, as the
+    /// app's playlist editor does (`commands::library::update_playlist`).
+    async fn rename_playlist(&self, uuid: &str, name: &str) -> Result<(), SoneError> {
+        let mut client = self.engine.tidal_client.lock().await;
+        let current = client.get_playlist_details(uuid).await?;
+        let description = current["description"].as_str().unwrap_or("").to_string();
+        // v1 answers `publicPlaylist`, the update takes `accessType`; never
+        // guess, a wrong one would publish a private playlist.
+        let access = match (current["accessType"].as_str(), current["publicPlaylist"].as_bool()) {
+            (Some(a), _) => a.to_string(),
+            (None, Some(true)) => "PUBLIC".to_string(),
+            (None, Some(false)) => "UNLISTED".to_string(),
+            (None, None) => return Err(SoneError::Parse(format!("playlist {uuid}: unknown visibility"))),
+        };
+        client.update_playlist(uuid, name, &description, &access).await?;
+        let user_id = client.tokens.as_ref().and_then(|t| t.user_id);
+        drop(client);
+        log::info!("[daemon] renamed playlist {uuid}");
+        let cache = &self.engine.disk_cache;
+        if let Some(uid) = user_id {
+            cache.invalidate_tag(&format!("user:{uid}")).await;
+        }
+        cache.invalidate_tag(&format!("playlist:{uuid}")).await;
+        cache.invalidate_tag("folders").await;
+        Ok(())
     }
 
     async fn search(&self, query: &str, limit: u32) -> Result<Value, SoneError> {

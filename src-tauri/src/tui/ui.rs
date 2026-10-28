@@ -264,6 +264,7 @@ fn draw_cmdline(app: &App, frame: &mut Frame, area: Rect) {
                 PromptKind::Command => app.config.keymap.describe(Action::CommandLine),
                 PromptKind::Search => app.config.keymap.describe(Action::Search),
                 PromptKind::Login => Some("paste the address the browser ended on: ".into()),
+                PromptKind::Rename => Some("rename: ".into()),
             }
             .unwrap_or_else(|| ":".into());
             let x = area.x + (prompt.chars().count() + text.chars().count()) as u16;

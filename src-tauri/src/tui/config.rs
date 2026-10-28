@@ -6,7 +6,7 @@
 //! # action = sequence or [sequences], nvim notation; replaces that
 //! # action's defaults. Actions: down up seek_back seek_forward top bottom
 //! # half_page_down half_page_up next_tab prev_tab command_line search
-//! # play_selected add_to_queue play_next remove_selected back toggle
+//! # play_selected add_to_queue play_next remove_selected rename back toggle
 //! # next_track prev_track volume_down volume_up quit
 //! down = ["n", "<Down>"]
 //!

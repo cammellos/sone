@@ -66,6 +66,7 @@ actions! {
     AddToQueue = "add_to_queue" ["a"],
     PlayNext = "play_next" ["A"],
     RemoveSelected = "remove_selected" ["dd"],
+    Rename = "rename" ["r"],
     Back = "back" ["<BS>"],
     Search = "search" ["/"],
     Toggle = "toggle" ["<Space>"],
