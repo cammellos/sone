@@ -176,6 +176,8 @@ fn draw_statusline(app: &App, frame: &mut Frame, area: Rect) {
     let s = &app.status;
     let (mode, mode_color) = if !app.connected {
         ("OFFLINE", c.error)
+    } else if !s.logged_in {
+        ("LOGGED OUT", c.error)
     } else {
         match s.state.as_str() {
             "playing" => ("PLAYING", c.primary),
@@ -210,11 +212,12 @@ fn draw_cmdline(app: &App, frame: &mut Frame, area: Rect) {
     let c = app.config.colors;
     let line = match (&app.mode, &app.message) {
         (Mode::Prompt(kind, text), _) => {
-            let action = match kind {
-                PromptKind::Command => Action::CommandLine,
-                PromptKind::Search => Action::Search,
-            };
-            let prompt = app.config.keymap.describe(action).unwrap_or_else(|| ":".into());
+            let prompt = match kind {
+                PromptKind::Command => app.config.keymap.describe(Action::CommandLine),
+                PromptKind::Search => app.config.keymap.describe(Action::Search),
+                PromptKind::Login => Some("paste the address the browser ended on: ".into()),
+            }
+            .unwrap_or_else(|| ":".into());
             let x = area.x + (prompt.chars().count() + text.chars().count()) as u16;
             frame.set_cursor_position((x, area.y));
             Line::from(vec![Span::styled(prompt, Style::default().fg(c.primary)), Span::raw(text.clone())])

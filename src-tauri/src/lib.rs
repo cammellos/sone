@@ -22,6 +22,7 @@ pub mod queue;
 #[cfg(feature = "tui")]
 pub mod tui;
 mod stream;
+mod pkce;
 #[cfg(feature = "gui")]
 mod idle_inhibit;
 pub mod logging;

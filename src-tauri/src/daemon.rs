@@ -9,6 +9,7 @@
 //! changes, `position` once a second while playing, and `seeked` after a seek.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +50,9 @@ pub struct Daemon {
     engine: Engine,
     player: Mutex<Player>,
     events: broadcast::Sender<String>,
+    logged_in: AtomicBool,
+    /// The PKCE login `login_start` began: (code verifier, client unique key).
+    pending_login: Mutex<Option<(String, String)>>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +78,7 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
     });
     let engine = Engine::new(sink, config_dir).await?;
     let volume = engine.settings.volume;
+    let logged_in = AtomicBool::new(engine.logged_in().await);
     let (events, _) = broadcast::channel(64);
     let daemon = Arc::new(Daemon {
         engine,
@@ -83,6 +88,8 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
             volume,
         }),
         events,
+        logged_in,
+        pending_login: Mutex::new(None),
     });
 
     // Audio engine events drive the queue.
@@ -339,6 +346,28 @@ impl Daemon {
                 self.player.lock().await.queue.replace(tracks, start, &mut rand);
                 self.start_current().await?;
             }
+            "login_start" => {
+                let params = crate::pkce::build_pkce_params(&crate::embedded_config::stream_key_c());
+                *self.pending_login.lock().await = Some((params.code_verifier, params.client_unique_key));
+                return Ok(json!({ "url": params.authorize_url }));
+            }
+            "login_finish" => {
+                let pasted = arg_str(args, "redirect_url")?;
+                let code = crate::pkce::code_from_redirect(pasted).ok_or_else(|| {
+                    SoneError::Parse("no login code in that: paste the address the browser ended on".into())
+                })?;
+                let (verifier, key) = self
+                    .pending_login
+                    .lock()
+                    .await
+                    .clone()
+                    .ok_or_else(|| SoneError::Parse("no login in progress: run login first".into()))?;
+                self.engine.login(&code, &verifier, &key).await?;
+                *self.pending_login.lock().await = None;
+                self.logged_in.store(true, Ordering::Relaxed);
+                log::info!("[daemon] logged in");
+                self.publish_state().await;
+            }
             "playlists" => return self.playlists().await,
             "source_tracks" => {
                 let source_type = arg_str(args, "source_type")?;
@@ -589,6 +618,7 @@ impl Daemon {
             "repeat": p.queue.repeat(),
             "shuffle": p.queue.shuffle(),
             "upcoming": p.queue.upcoming().count(),
+            "loggedIn": self.logged_in.load(Ordering::Relaxed),
         })
     }
 

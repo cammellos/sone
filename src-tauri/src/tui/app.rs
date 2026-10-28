@@ -82,12 +82,15 @@ pub struct Status {
     pub volume: f64,
     pub repeat: String,
     pub shuffle: bool,
+    pub logged_in: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     Command,
     Search,
+    /// The address the browser ended on after signing in (`;login`).
+    Login,
 }
 
 pub enum Mode {
@@ -117,6 +120,10 @@ pub enum Expect {
     /// An artist's albums and top tracks, like `Tracks`.
     Artist { tab: usize, source: (String, String) },
     Search { query: String },
+    /// `login_start`: the sign-in page to open.
+    LoginStart,
+    /// `login_finish`: the status once logged in.
+    LoginFinish,
 }
 
 pub struct App {
@@ -140,6 +147,8 @@ pub struct App {
     position_at: Instant,
     last_query: Option<String>,
     pub outbox: Vec<(&'static str, Value, Expect)>,
+    /// A page to open in the browser; the event loop runs xdg-open.
+    pub open_url: Option<String>,
     expecting: HashMap<u64, Expect>,
 }
 
@@ -163,6 +172,7 @@ impl App {
             position_at: Instant::now(),
             last_query: None,
             outbox: Vec::new(),
+            open_url: None,
             expecting: HashMap::new(),
         }
     }
@@ -266,6 +276,17 @@ impl App {
                 let title = format!("/{query}");
                 self.fill(SEARCH, |view| view.title == title, search_rows(&v));
             }
+            Expect::LoginStart => {
+                self.open_url = v["url"].as_str().map(str::to_string);
+                self.mode = Mode::Prompt(PromptKind::Login, String::new());
+            }
+            Expect::LoginFinish => {
+                self.apply_status(&v);
+                self.info("logged in");
+                if self.tab == PLAYLISTS {
+                    self.load_playlists();
+                }
+            }
         }
     }
 
@@ -308,13 +329,19 @@ impl App {
         if v.get("state").is_none() {
             return;
         }
+        let was_logged_in = self.status.logged_in || self.status.state.is_empty();
         self.status = Status {
             state: str_of(&v["state"]),
             track: Track::from_json(&v["track"]),
             volume: v["volume"].as_f64().unwrap_or(0.0),
             repeat: v["repeat"].as_str().unwrap_or("off").to_string(),
             shuffle: v["shuffle"].as_bool().unwrap_or(false),
+            logged_in: v["loggedIn"].as_bool().unwrap_or(true),
         };
+        if was_logged_in && !self.status.logged_in {
+            let login = self.config.keymap.describe(Action::CommandLine).unwrap_or_default();
+            self.error(format!("not logged in to Tidal: {login}login"));
+        }
         self.set_position(v["positionSeconds"].as_f64());
     }
 
@@ -381,6 +408,15 @@ impl App {
                         PromptKind::Command => self.run_command(&line),
                         PromptKind::Search if line.trim().is_empty() => {}
                         PromptKind::Search => self.search(line.trim()),
+                        PromptKind::Login if line.trim().is_empty() => {}
+                        PromptKind::Login => {
+                            self.info("logging in…");
+                            self.request(
+                                "login_finish",
+                                json!({ "redirect_url": line.trim() }),
+                                Expect::LoginFinish,
+                            );
+                        }
                     }
                 }
                 Key::Backspace => {
@@ -548,6 +584,7 @@ impl App {
     fn run_command(&mut self, line: &str) {
         match parse_command(line) {
             Ok(Command::Quit) => self.quit = true,
+            Ok(Command::Login) => self.request("login_start", Value::Null, Expect::LoginStart),
             Ok(Command::Refresh) => match self.tab {
                 QUEUE => self.refresh_queue(),
                 PLAYLISTS => self.load_playlists(),
@@ -652,6 +689,7 @@ fn artist_rows(v: &Value) -> Vec<Row> {
 
 enum Command {
     Quit,
+    Login,
     Refresh,
     Send(&'static str, Value),
 }
@@ -668,6 +706,7 @@ fn parse_command(line: &str) -> Result<Command, String> {
     match words.as_slice() {
         ["q"] | ["quit"] => Ok(Command::Quit),
         ["r"] | ["refresh"] => Ok(Command::Refresh),
+        ["login"] => Ok(Command::Login),
         ["play", rest @ ..] => send("play_source", source(rest)?),
         ["shuffle-play", rest @ ..] => send("shuffle_source", source(rest)?),
         ["repeat", m @ ("off" | "all" | "one")] => send("repeat", json!({ "mode": m })),
@@ -960,5 +999,46 @@ mod tests {
             sent_cmds(&app),
             vec![("play_source", json!({ "source_type": "artist", "id": "9", "start": 1 }))]
         );
+    }
+
+    #[test]
+    fn login_opens_the_page_then_sends_the_pasted_address() {
+        let mut app = app_with_queue(1);
+        press(&mut app, ";login<CR>");
+        assert_eq!(sent_cmds(&app), vec![("login_start", Value::Null)]);
+        answer_last(&mut app, json!({ "url": "https://login.tidal.com/authorize?x=1" }));
+        assert_eq!(app.open_url.as_deref(), Some("https://login.tidal.com/authorize?x=1"));
+        assert!(matches!(app.mode, Mode::Prompt(PromptKind::Login, _)));
+        // pasted text arrives as plain keys; letters typed here are not commands
+        press(&mut app, "https://tidal.com/a?code=nq<CR>");
+        assert_eq!(
+            sent_cmds(&app),
+            vec![("login_finish", json!({ "redirect_url": "https://tidal.com/a?code=nq" }))]
+        );
+        answer_last(&mut app, json!({ "state": "stopped", "loggedIn": true }));
+        assert!(app.status.logged_in);
+        assert_eq!(app.message.as_ref().unwrap().text, "logged in");
+    }
+
+    #[test]
+    fn esc_cancels_the_login_prompt() {
+        let mut app = app_with_queue(1);
+        press(&mut app, ";login<CR>");
+        answer_last(&mut app, json!({ "url": "u" }));
+        press(&mut app, "abc<Esc>");
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.outbox.is_empty());
+    }
+
+    #[test]
+    fn logged_out_status_says_how_to_log_in_once() {
+        let mut app = App::new(Config::default());
+        let status = json!({ "state": "stopped", "loggedIn": false });
+        app.on_event("state", &status);
+        assert!(!app.status.logged_in);
+        assert_eq!(app.message.as_ref().unwrap().text, "not logged in to Tidal: ;login");
+        app.message = None;
+        app.on_event("state", &status);
+        assert!(app.message.is_none(), "not repeated on every state event");
     }
 }

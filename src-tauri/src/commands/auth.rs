@@ -1,7 +1,4 @@
-use base64::Engine;
-use rand::RngExt;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -83,15 +80,7 @@ pub struct ParsedTokens {
     access_token: Option<String>,
 }
 
-const PKCE_REDIRECT_URI: &str = "https://tidal.com/android/login/auth";
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PkceAuthParams {
-    authorize_url: String,
-    code_verifier: String,
-    client_unique_key: String,
-}
+use crate::pkce::{build_pkce_params, PkceAuthParams, PKCE_REDIRECT_URI};
 
 #[tauri::command]
 pub fn greet(name: &str) -> String {
@@ -312,32 +301,6 @@ pub async fn refresh_tidal_auth(state: State<'_, AppState>) -> Result<AuthTokens
     let mut client = state.tidal_client.lock().await;
     // refresh_token persists the new tokens via the client's persist hook.
     client.refresh_token().await
-}
-
-fn build_pkce_params(client_id: &str) -> PkceAuthParams {
-    let mut rng = rand::rng();
-    let random_bytes: [u8; 32] = rng.random();
-    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes);
-
-    let mut hasher = Sha256::new();
-    hasher.update(code_verifier.as_bytes());
-    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
-
-    let client_unique_key = format!("{:016x}", rng.random::<u64>());
-
-    let authorize_url = format!(
-        "https://login.tidal.com/authorize?response_type=code&redirect_uri={}&client_id={}&lang=EN&appMode=android&client_unique_key={}&code_challenge={}&code_challenge_method=S256&restrict_signup=true",
-        "https%3A%2F%2Ftidal.com%2Fandroid%2Flogin%2Fauth",
-        client_id,
-        client_unique_key,
-        code_challenge,
-    );
-
-    PkceAuthParams {
-        authorize_url,
-        code_verifier,
-        client_unique_key,
-    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

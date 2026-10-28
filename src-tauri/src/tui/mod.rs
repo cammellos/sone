@@ -67,6 +67,10 @@ pub async fn run(terminal: &mut DefaultTerminal, socket: PathBuf, config_path: O
             app.outbox.clear();
         }
 
+        if let Some(url) = app.open_url.take() {
+            open_in_browser(&mut app, &url);
+        }
+
         terminal.draw(|f| ui::draw(&mut app, f))?;
 
         let incoming = async {
@@ -106,6 +110,21 @@ async fn connect(socket: &Path) -> std::io::Result<(Client, mpsc::UnboundedRecei
     // The subscribe reply is the current status; it arrives like any other.
     client.request("subscribe", serde_json::Value::Null).await?;
     Ok((client, rx))
+}
+
+/// xdg-open, detached; its output would draw over the TUI.
+fn open_in_browser(app: &mut App, url: &str) {
+    let spawned = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Err(e) = spawned {
+        // The prompt would hide the message: there's nothing to paste anyway.
+        app.mode = app::Mode::Normal;
+        app.error(format!("can't open the browser ({e}): sign in with `sonectl login` instead"));
+    }
 }
 
 fn to_key(k: KeyEvent) -> Option<Key> {

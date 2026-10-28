@@ -23,6 +23,7 @@ const USAGE: &str = "usage: sonectl <command>
   jump <n>                    play the nth upcoming track (1 = next)
   remove <track id>           drop it from the upcoming tracks
   clear                       drop all upcoming tracks
+  login                       sign in to Tidal in the browser
   playlists                   your playlists (uuid, tracks, title)
   search <query>              tracks, albums, artists and playlists
   watch                       print state changes as JSON lines
@@ -39,6 +40,10 @@ fn main() {
     let socket = std::env::var_os("SONE_SOCKET")
         .map(Into::into)
         .unwrap_or_else(tauri_app_lib::daemon::default_socket_path);
+
+    if args == ["login"] {
+        return login(&socket);
+    }
 
     let (cmd, req_args, print): (&str, Value, fn(&Value)) = match parse(&args) {
         Ok(x) => x,
@@ -76,6 +81,51 @@ fn main() {
             println!("{line}");
         }
     }
+}
+
+/// One request on its own connection; exits with the daemon's error.
+fn call(socket: &std::path::Path, cmd: &str, args: Value) -> Value {
+    let stream = UnixStream::connect(socket).unwrap_or_else(|e| {
+        eprintln!("sonectl: cannot reach soned at {}: {e}", socket.display());
+        std::process::exit(1);
+    });
+    let mut writer = stream.try_clone().expect("clone socket");
+    writeln!(writer, "{}", json!({ "id": 1, "cmd": cmd, "args": args })).expect("write request");
+    let line = BufReader::new(stream).lines().next().and_then(Result::ok).unwrap_or_else(|| {
+        eprintln!("sonectl: daemon closed the connection");
+        std::process::exit(1);
+    });
+    let reply: Value = serde_json::from_str(&line).expect("daemon sent invalid JSON");
+    if reply["ok"] != json!(true) {
+        eprintln!("sonectl: {}", reply["error"].as_str().unwrap_or("error"));
+        std::process::exit(1);
+    }
+    reply["result"].clone()
+}
+
+/// PKCE login: open Tidal's sign-in page, then hand the daemon the address
+/// the browser ends on.
+fn login(socket: &std::path::Path) {
+    let url = call(socket, "login_start", Value::Null)["url"].as_str().unwrap_or_default().to_string();
+    println!("Sign in to Tidal at:\n\n  {url}\n");
+    let opened = std::process::Command::new("xdg-open")
+        .arg(&url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if opened {
+        println!("(opened in your browser)");
+    }
+    println!("Then paste the address the browser ends on (https://tidal.com/android/login/auth?code=…):");
+    let mut pasted = String::new();
+    if std::io::stdin().read_line(&mut pasted).is_err() || pasted.trim().is_empty() {
+        eprintln!("sonectl: nothing pasted, login cancelled");
+        std::process::exit(1);
+    }
+    let status = call(socket, "login_finish", json!({ "redirect_url": pasted.trim() }));
+    println!("logged in");
+    print_status(&status);
 }
 
 type Parsed<'a> = (&'a str, Value, fn(&Value));
@@ -187,6 +237,9 @@ fn print_status(s: &Value) {
             mmss(t["durationSeconds"].as_f64().unwrap_or(0.0)),
         ),
         None => println!("[{state}] nothing queued"),
+    }
+    if s["loggedIn"] == json!(false) {
+        println!("not logged in: sonectl login");
     }
     println!(
         "volume {:.0}%  repeat {}  shuffle {}  {} upcoming",

@@ -2,8 +2,8 @@
 //! settings SONE already stores. Used by the headless daemon (`soned`); the
 //! GUI builds the same parts inside `AppState::new`.
 //!
-//! The engine never writes settings except refreshed auth tokens, and runs no
-//! migrations: logging in and changing settings stay the GUI's job.
+//! The engine writes settings only to save a login (`login`) and refreshed
+//! auth tokens, and runs no migrations: changing settings stays the GUI's job.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,26 +45,27 @@ pub struct Engine {
     /// entries the GUI would otherwise show stale.
     pub disk_cache: DiskCache,
     pub settings: Settings,
+    settings_path: PathBuf,
+    crypto: Arc<Crypto>,
 }
 
 impl Engine {
     /// Build the engine from the settings in `config_dir` (normally
-    /// `~/.config/sone`). Fails when the settings cannot be read or hold no
-    /// login: the daemon has no way to log in on its own.
+    /// `~/.config/sone`); without a settings file, from the defaults and
+    /// logged out (`login` fixes that). Fails when the file exists but can't
+    /// be read, so it is never overwritten.
     pub async fn new(sink: EventSink, config_dir: &Path) -> Result<Self, SoneError> {
         let settings_path = config_dir.join("settings.json");
+        fs::create_dir_all(config_dir)?;
         let crypto = Arc::new(Crypto::new(config_dir)?);
         let disk_cache = DiskCache::new(&config_dir.join("cache"), Arc::clone(&crypto));
-        let settings = read_settings(&settings_path, &crypto).ok_or_else(|| {
-            SoneError::NotConfigured(format!(
-                "cannot read {}: start SONE once and log in",
-                settings_path.display()
-            ))
-        })?;
-        let tokens = settings
-            .auth_tokens
-            .clone()
-            .ok_or(SoneError::NotAuthenticated)?;
+        let settings = if settings_path.exists() {
+            read_settings(&settings_path, &crypto).ok_or_else(|| {
+                SoneError::NotConfigured(format!("cannot read {}", settings_path.display()))
+            })?
+        } else {
+            Settings::default()
+        };
 
         let host_caps = crate::audio::probe_host_caps();
         let proxied_http =
@@ -90,10 +91,14 @@ impl Engine {
             })
         });
         let (id, secret) = resolve_credentials(&settings);
-        client.tokens = Some(tokens);
+        client.tokens = settings.auth_tokens.clone();
         client.set_credentials(&id, &secret);
-        if let Err(e) = client.get_session_info().await {
-            log::warn!("[engine] session info failed (using default country code): {e}");
+        if client.tokens.is_some() {
+            if let Err(e) = client.get_session_info().await {
+                log::warn!("[engine] session info failed (using default country code): {e}");
+            }
+        } else {
+            log::warn!("[engine] not logged in");
         }
 
         Ok(Self {
@@ -102,7 +107,43 @@ impl Engine {
             signal_path,
             disk_cache,
             settings,
+            settings_path,
+            crypto,
         })
+    }
+
+    pub async fn logged_in(&self) -> bool {
+        self.tidal_client.lock().await.tokens.is_some()
+    }
+
+    /// Finish a PKCE login (`crate::pkce`) with the embedded credentials and
+    /// save it the way the app's browser login does (`finish_embedded_pkce`).
+    pub async fn login(&self, code: &str, code_verifier: &str, client_unique_key: &str) -> Result<(), SoneError> {
+        if !crate::embedded_config::has_pkce_keys() {
+            return Err(SoneError::NotConfigured("PKCE credentials are not embedded in this build".into()));
+        }
+        let mut client = self.tidal_client.lock().await;
+        client.set_credentials(
+            &crate::embedded_config::stream_key_c(),
+            &crate::embedded_config::stream_key_d(),
+        );
+        let tokens = client
+            .exchange_pkce_code(code, code_verifier, crate::pkce::PKCE_REDIRECT_URI, client_unique_key)
+            .await?;
+        if let Err(e) = client.get_session_info().await {
+            log::warn!("[engine] session info failed after login: {e}");
+        }
+        drop(client);
+
+        let mut settings = read_settings(&self.settings_path, &self.crypto).unwrap_or_default();
+        settings.auth_tokens = Some(tokens);
+        settings.auth_method = AuthMethod::Pkce;
+        settings.legacy_auth_notice_count = 0;
+        settings.client_id = String::new();
+        settings.client_secret = String::new();
+        let json = serde_json::to_string_pretty(&settings)?;
+        fs::write(&self.settings_path, self.crypto.encrypt(json.as_bytes())?)?;
+        Ok(())
     }
 
     /// Resolve a track's stream with the stored quality and normalization
