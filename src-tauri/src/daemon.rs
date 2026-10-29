@@ -212,6 +212,10 @@ async fn start_mcp(
         let daemon = Arc::clone(daemon);
         tokio::spawn(async move {
             while let Some((name, payload)) = rx.recv().await {
+                if is_playlists_event(&name) {
+                    daemon.publish("playlists-changed", Value::Null);
+                    continue;
+                }
                 let Some((cmd, args)) = mcp_event_command(&name, &payload) else {
                     continue;
                 };
@@ -230,9 +234,17 @@ async fn start_mcp(
     }
 }
 
+/// MCP changes to the user's playlists; clients get them as one
+/// `playlists-changed` event and reload their list.
+fn is_playlists_event(name: &str) -> bool {
+    use crate::mcp::events::*;
+    [EV_PLAYLIST_CREATED, EV_PLAYLIST_UPDATED, EV_PLAYLIST_DELETED, EV_PLAYLIST_TRACKS_CHANGED]
+        .contains(&name)
+}
+
 /// The MCP playback tools emit the events the GUI frontend listens for; map
-/// them onto daemon commands. Library-change events (playlist created,
-/// favorite changed) only refresh GUI views, so they map to nothing.
+/// them onto daemon commands. Other library-change events (favorite changed)
+/// only refresh GUI views, so they map to nothing.
 fn mcp_event_command(name: &str, p: &Value) -> Option<(&'static str, Value)> {
     use crate::mcp::events::*;
     Some(match name {

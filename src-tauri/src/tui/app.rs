@@ -3,7 +3,7 @@
 //! loop sends them and hands the replies back.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -141,6 +141,10 @@ pub struct SettingsPage {
     pub confirm_logout: bool,
 }
 
+/// How often the playlist list is reloaded in the background, for changes made
+/// elsewhere (phone, web). Changes made through MCP arrive as an event.
+const PLAYLISTS_REFRESH: Duration = Duration::from_secs(300);
+
 pub const TABS: &[&str] = &["Queue", "Playlists", "Search"];
 pub const QUEUE: usize = 0;
 pub const PLAYLISTS: usize = 1;
@@ -153,6 +157,8 @@ pub enum Expect {
     Status,
     Queue,
     Playlists,
+    /// A background reload of the playlist list (`refresh_playlists`).
+    PlaylistsRefresh,
     /// A source's tracks, for the top view of `tab` if it's still the one waiting.
     Tracks { tab: usize, source: (String, String) },
     /// An artist's albums and top tracks, like `Tracks`.
@@ -198,6 +204,8 @@ pub struct App {
     renaming: Option<(String, String)>,
     /// `dd` once on this playlist: the next `dd` on it deletes it.
     confirm_delete: Option<String>,
+    /// When the playlist list was last (re)loaded.
+    playlists_loaded_at: Instant,
     expecting: HashMap<u64, Expect>,
 }
 
@@ -225,6 +233,7 @@ impl App {
             settings: None,
             renaming: None,
             confirm_delete: None,
+            playlists_loaded_at: Instant::now(),
             expecting: HashMap::new(),
         }
     }
@@ -302,6 +311,7 @@ impl App {
         let expect = self.expecting.remove(&id).unwrap_or(Expect::Status);
         let v = match result {
             Ok(v) => v,
+            Err(_) if matches!(expect, Expect::PlaylistsRefresh) => return,
             Err(e) => {
                 self.stop_loading(&expect);
                 self.error(e);
@@ -317,6 +327,10 @@ impl App {
             Expect::Playlists => {
                 let rows = v["playlists"].as_array().into_iter().flatten().map(playlist_row).collect();
                 self.fill(PLAYLISTS, |view| view.title.is_empty(), rows);
+            }
+            Expect::PlaylistsRefresh => {
+                let rows = v["playlists"].as_array().into_iter().flatten().map(playlist_row).collect();
+                self.replace_playlists(rows);
             }
             Expect::Tracks { tab, source } => {
                 self.fill(tab, |view| view.source.as_ref() == Some(&source), track_rows(&v["tracks"]));
@@ -390,6 +404,7 @@ impl App {
                 self.refresh_queue();
             }
             "position" | "seeked" => self.set_position(data["positionSeconds"].as_f64()),
+            "playlists-changed" => self.refresh_playlists(),
             "audio-error" => self.error(format!("audio error: {data}")),
             _ => {}
         }
@@ -435,7 +450,41 @@ impl App {
         self.request("queue", json!({ "limit": 1000 }), Expect::Queue);
     }
 
+    /// Reload the playlist list without disturbing what's open: only an
+    /// already-loaded root view is updated, when the reply comes.
+    fn refresh_playlists(&mut self) {
+        self.playlists_loaded_at = Instant::now();
+        if self.stacks[PLAYLISTS].first().is_some_and(|v| !v.loading) {
+            self.request("playlists", Value::Null, Expect::PlaylistsRefresh);
+        }
+    }
+
+    /// Put fresh rows in the root playlist view, keeping the selection on the
+    /// same playlist (or as close as the list allows).
+    fn replace_playlists(&mut self, rows: Vec<Row>) {
+        let Some(root) = self.stacks[PLAYLISTS].first_mut() else { return };
+        if root.loading {
+            return;
+        }
+        let selected_uuid = match root.rows.get(root.selected) {
+            Some(Row::Playlist { uuid, .. }) => Some(uuid.clone()),
+            _ => None,
+        };
+        root.rows = rows;
+        root.selected = selected_uuid
+            .and_then(|id| root.rows.iter().position(|r| matches!(r, Row::Playlist { uuid, .. } if *uuid == id)))
+            .unwrap_or(root.selected.min(root.rows.len().saturating_sub(1)));
+    }
+
+    /// Called on the event loop's tick: reload the playlist list now and then.
+    pub fn on_tick(&mut self, now: Instant) {
+        if self.connected && now.duration_since(self.playlists_loaded_at) >= PLAYLISTS_REFRESH {
+            self.refresh_playlists();
+        }
+    }
+
     fn load_playlists(&mut self) {
+        self.playlists_loaded_at = Instant::now();
         self.stacks[PLAYLISTS] = vec![View::loading("")];
         self.request("playlists", Value::Null, Expect::Playlists);
     }
@@ -1039,6 +1088,62 @@ mod tests {
         press(&mut app, "g");
         assert!(app.message.is_none());
         assert_eq!(app.pending_keys().len(), 1);
+    }
+
+    fn app_with_playlists() -> App {
+        let mut app = app_with_queue(1);
+        app.connected = true;
+        press(&mut app, ",o");
+        answer_last(
+            &mut app,
+            json!({ "playlists": [{ "uuid": "u1", "title": "One", "tracks": 3 }, { "uuid": "u2", "title": "Two", "tracks": 5 }] }),
+        );
+        app
+    }
+
+    #[test]
+    fn playlists_changed_event_reloads_keeping_selection_and_open_view() {
+        let mut app = app_with_playlists();
+        press(&mut app, "n<CR>");
+        answer_last(&mut app, json!({ "tracks": [track_json(10)] }));
+        app.outbox.clear();
+
+        app.on_event("playlists-changed", &Value::Null);
+        assert_eq!(sent_cmds(&app), vec![("playlists", Value::Null)]);
+        answer_last(
+            &mut app,
+            json!({ "playlists": [{ "uuid": "u0", "title": "New", "tracks": 18 }, { "uuid": "u1", "title": "One", "tracks": 3 }, { "uuid": "u2", "title": "Two", "tracks": 5 }] }),
+        );
+        // the open playlist stays open; the list under it has the new one, still on "Two"
+        assert_eq!(app.view().unwrap().title, "Two");
+        let root = &app.stacks[PLAYLISTS][0];
+        assert_eq!(root.rows.len(), 3);
+        assert!(matches!(&root.rows[root.selected], Row::Playlist { uuid, .. } if uuid == "u2"));
+    }
+
+    #[test]
+    fn playlists_refresh_is_quiet_and_skipped_before_first_load() {
+        let mut app = app_with_queue(1);
+        app.on_event("playlists-changed", &Value::Null);
+        assert!(app.outbox.is_empty());
+
+        let mut app = app_with_playlists();
+        app.on_event("playlists-changed", &Value::Null);
+        let (_, _, expect) = app.outbox.pop().unwrap();
+        app.sent(7, expect);
+        app.on_reply(7, Err("network".into()));
+        assert!(app.message.is_none());
+        assert_eq!(app.stacks[PLAYLISTS][0].rows.len(), 2);
+    }
+
+    #[test]
+    fn playlists_reload_every_few_minutes() {
+        let mut app = app_with_playlists();
+        let loaded = app.playlists_loaded_at;
+        app.on_tick(loaded + PLAYLISTS_REFRESH - Duration::from_secs(1));
+        assert!(app.outbox.is_empty());
+        app.on_tick(loaded + PLAYLISTS_REFRESH);
+        assert_eq!(sent_cmds(&app), vec![("playlists", Value::Null)]);
     }
 
     #[test]

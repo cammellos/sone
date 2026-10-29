@@ -99,7 +99,7 @@ pub async fn run(terminal: &mut DefaultTerminal, socket: PathBuf, config_path: O
                     retry_at = tokio::time::Instant::now() + Duration::from_secs(2);
                 }
             },
-            _ = tick.tick() => {}
+            _ = tick.tick() => app.on_tick(std::time::Instant::now()),
         }
     }
     Ok(())
