@@ -73,7 +73,31 @@ pub fn default_socket_path() -> PathBuf {
         .join("sone.sock")
 }
 
-pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError> {
+/// Where the MCP server listens: port and token, as in the URL clients use.
+pub struct McpConfig {
+    pub port: u16,
+    pub token: String,
+}
+
+/// Parse an MCP URL of the form `http://127.0.0.1:<port>/<token>/mcp`.
+pub fn parse_mcp_url(url: &str) -> Option<McpConfig> {
+    let rest = url.trim().strip_prefix("http://")?;
+    let mut parts = rest.split('/');
+    let port = parts.next()?.rsplit_once(':')?.1.parse().ok()?;
+    let token = parts.next()?.to_string();
+    match (parts.next(), parts.next()) {
+        (Some("mcp"), None) if !token.is_empty() => Some(McpConfig { port, token }),
+        _ => None,
+    }
+}
+
+/// Run the daemon. With `mcp`, the MCP server uses that port and token
+/// whatever the settings say; without it, the settings decide.
+pub async fn run(
+    config_dir: &Path,
+    socket_path: &Path,
+    mcp: Option<McpConfig>,
+) -> Result<(), SoneError> {
     let (engine_tx, mut engine_rx) = mpsc::unbounded_channel::<(String, Value)>();
     let sink = EventSink::new(move |name, payload| {
         let _ = engine_tx.send((name.to_string(), payload));
@@ -120,7 +144,7 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
         });
     }
 
-    let mcp = start_mcp(&daemon).await;
+    let mcp = start_mcp(&daemon, mcp).await;
     mpris::spawn(Arc::clone(&daemon)).await;
 
     if socket_path.exists() {
@@ -157,14 +181,26 @@ pub async fn run(config_dir: &Path, socket_path: &Path) -> Result<(), SoneError>
     Ok(())
 }
 
-/// Serve the same MCP tools as the GUI, on the port and token stored in
-/// SONE's settings, when MCP is enabled there.
-async fn start_mcp(daemon: &Arc<Daemon>) -> Option<crate::mcp::McpHandle> {
-    let settings = daemon.engine.settings();
-    if !settings.mcp_enabled || settings.mcp_token.is_empty() {
-        log::info!("[daemon] MCP disabled in settings");
-        return None;
-    }
+/// Serve the same MCP tools as the GUI, on the given port and token, or else
+/// on those stored in SONE's settings when MCP is enabled there.
+async fn start_mcp(
+    daemon: &Arc<Daemon>,
+    config: Option<McpConfig>,
+) -> Option<crate::mcp::McpHandle> {
+    let config = match config {
+        Some(config) => config,
+        None => {
+            let settings = daemon.engine.settings();
+            if !settings.mcp_enabled || settings.mcp_token.is_empty() {
+                log::info!("[daemon] MCP disabled in settings");
+                return None;
+            }
+            McpConfig {
+                port: settings.mcp_port,
+                token: settings.mcp_token.clone(),
+            }
+        }
+    };
     let (tx, mut rx) = mpsc::unbounded_channel::<(String, Value)>();
     let host = Arc::new(DaemonHost {
         daemon: Arc::clone(daemon),
@@ -185,7 +221,7 @@ async fn start_mcp(daemon: &Arc<Daemon>) -> Option<crate::mcp::McpHandle> {
             }
         });
     }
-    match crate::mcp::start_server(host, settings.mcp_port, settings.mcp_token.clone()).await {
+    match crate::mcp::start_server(host, config.port, config.token).await {
         Ok(handle) => Some(handle),
         Err(e) => {
             log::error!("[daemon] MCP server failed to start: {e}");
@@ -927,4 +963,29 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, SoneError> {
 
 fn rand_below(n: usize) -> usize {
     rand::rng().random_range(0..n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mcp_url;
+
+    #[test]
+    fn parses_mcp_url() {
+        let c = parse_mcp_url("http://127.0.0.1:5577/abc123/mcp\n").unwrap();
+        assert_eq!((c.port, c.token.as_str()), (5577, "abc123"));
+    }
+
+    #[test]
+    fn rejects_malformed_mcp_urls() {
+        for url in [
+            "",
+            "https://127.0.0.1:5577/abc/mcp",
+            "http://127.0.0.1/abc/mcp",
+            "http://127.0.0.1:5577//mcp",
+            "http://127.0.0.1:5577/abc",
+            "http://127.0.0.1:5577/abc/mcp/x",
+        ] {
+            assert!(parse_mcp_url(url).is_none(), "{url}");
+        }
+    }
 }
