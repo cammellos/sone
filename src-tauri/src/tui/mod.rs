@@ -11,12 +11,15 @@ mod ui;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use app::App;
+use app::{App, Mouse};
 use client::{Client, Incoming};
 use keys::Key;
 
@@ -25,6 +28,7 @@ pub async fn run(terminal: &mut DefaultTerminal, socket: PathBuf, config_path: O
         Some(p) => config::load(p),
         None => Default::default(),
     };
+    let _mouse = if config.mouse { Some(MouseCapture::enable()?) } else { None };
     let mut app = App::new(config);
     if !errors.is_empty() {
         app.error(errors.join("; "));
@@ -86,6 +90,11 @@ pub async fn run(terminal: &mut DefaultTerminal, socket: PathBuf, config_path: O
                         app.on_key(key);
                     }
                 }
+                Some(Ok(Event::Mouse(m))) => {
+                    if let Some(mouse) = to_mouse(m) {
+                        app.on_mouse(mouse, std::time::Instant::now());
+                    }
+                }
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e),
                 None => break,
@@ -125,6 +134,32 @@ fn open_in_browser(app: &mut App, url: &str) {
         app.mode = app::Mode::Normal;
         app.error(format!("can't open the browser ({e}): sign in with `sonectl login` instead"));
     }
+}
+
+/// Mouse reporting on while it lives. Dropping it turns reporting off, also on
+/// an error or a panic, or the shell would get the mouse's escape codes.
+struct MouseCapture;
+
+impl MouseCapture {
+    fn enable() -> std::io::Result<Self> {
+        crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseCapture {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
+}
+
+fn to_mouse(m: MouseEvent) -> Option<Mouse> {
+    Some(match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => Mouse::Click { column: m.column, row: m.row },
+        MouseEventKind::ScrollUp => Mouse::ScrollUp,
+        MouseEventKind::ScrollDown => Mouse::ScrollDown,
+        _ => return None,
+    })
 }
 
 fn to_key(k: KeyEvent) -> Option<Key> {

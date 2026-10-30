@@ -2,6 +2,11 @@
 //! its default.
 //!
 //! ```toml
+//! # Click to select, double-click to play/open, wheel to scroll, click a tab
+//! # to switch. Off by default: while on, selecting text in the terminal needs
+//! # its override modifier (shift in kitty, foot, alacritty).
+//! mouse = true
+//!
 //! [keys]
 //! # action = sequence or [sequences], nvim notation; replaces that
 //! # action's defaults. Actions: down up seek_back seek_forward top bottom
@@ -67,6 +72,7 @@ colors! {
 pub struct Config {
     pub keymap: Keymap,
     pub colors: Colors,
+    pub mouse: bool,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -136,7 +142,16 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
         }
     }
 
-    (Config { keymap, colors }, errors)
+    let mouse = match table.get("mouse") {
+        None => false,
+        Some(toml::Value::Boolean(on)) => *on,
+        Some(_) => {
+            errors.push("mouse: expected true or false".into());
+            false
+        }
+    };
+
+    (Config { keymap, colors, mouse }, errors)
 }
 
 fn parse_hex(s: &str) -> Option<Color> {
@@ -201,6 +216,15 @@ mod tests {
         assert_eq!(errors.len(), 3, "{errors:?}");
         assert_eq!(action_for(&cfg.keymap, "n"), Some(Action::Down));
         assert_eq!(cfg.colors.primary, Colors::default().primary);
+    }
+
+    #[test]
+    fn mouse_is_off_unless_turned_on() {
+        assert!(!parse("").0.mouse);
+        assert!(parse("mouse = true").0.mouse);
+        let (cfg, errors) = parse("mouse = \"yes\"");
+        assert!(!cfg.mouse);
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 
     #[test]

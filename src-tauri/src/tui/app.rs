@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use ratatui::layout::{Position, Rect};
 use serde_json::{json, Value};
 
 use super::config::Config;
@@ -61,6 +62,8 @@ pub struct View {
     pub title: String,
     pub rows: Vec<Row>,
     pub selected: usize,
+    /// First row on screen, kept between frames so a click lands where it was aimed.
+    pub offset: usize,
     pub source: Option<(String, String)>,
     pub loading: bool,
 }
@@ -137,6 +140,7 @@ pub struct SettingsPage {
     /// The daemon's `settings` reply; Null while loading.
     pub values: Value,
     pub selected: usize,
+    pub offset: usize,
     /// `<CR>` on "Log out" once: the next `<CR>` there logs out.
     pub confirm_logout: bool,
 }
@@ -149,6 +153,28 @@ pub const TABS: &[&str] = &["Queue", "Playlists", "Search"];
 pub const QUEUE: usize = 0;
 pub const PLAYLISTS: usize = 1;
 pub const SEARCH: usize = 2;
+
+/// Rows one wheel notch moves the selection.
+const SCROLL_ROWS: usize = 3;
+/// A second click on the same cell within this is a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// The mouse events the TUI uses (`mouse = true` in tui.toml).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mouse {
+    Click { column: u16, row: u16 },
+    ScrollUp,
+    ScrollDown,
+}
+
+/// Where the last frame drew what a click can hit.
+#[derive(Debug, Clone, Default)]
+pub struct Areas {
+    /// Each tab's label in the tabline, in `TABS` order.
+    pub tabs: Vec<Rect>,
+    /// The list (or hint) under the tabline.
+    pub body: Rect,
+}
 
 /// What a request's reply is.
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +209,7 @@ pub struct App {
     pub upcoming: Vec<Track>,
     /// Row in the queue list: 0 is the current track, 1.. the upcoming ones.
     pub queue_selected: usize,
+    pub queue_offset: usize,
     /// View stacks of the Playlists and Search tabs (index = tab).
     pub stacks: [Vec<View>; 3],
     pub tab: usize,
@@ -192,6 +219,9 @@ pub struct App {
     pub quit: bool,
     /// Rows the list showed last frame, for half-page moves.
     pub list_height: usize,
+    pub areas: Areas,
+    /// The last click that wasn't the second of a double click: when and where.
+    last_click: Option<(Instant, u16, u16)>,
     pending: Vec<Key>,
     position: f64,
     position_at: Instant,
@@ -217,6 +247,7 @@ impl App {
             queue_current: None,
             upcoming: Vec::new(),
             queue_selected: 0,
+            queue_offset: 0,
             stacks: Default::default(),
             tab: QUEUE,
             mode: Mode::Normal,
@@ -224,6 +255,8 @@ impl App {
             connected: false,
             quit: false,
             list_height: 10,
+            areas: Areas::default(),
+            last_click: None,
             pending: Vec::new(),
             position: 0.0,
             position_at: Instant::now(),
@@ -559,6 +592,81 @@ impl App {
         self.message = None;
         if let Match::Action(action) = self.config.keymap.feed(&mut self.pending, key) {
             self.do_action(action);
+        }
+    }
+
+    // ---- mouse -> app -----------------------------------------------------
+
+    /// Wheel: move the selection. Click: a tab switches to it, a row selects
+    /// it, and a second click on it acts like `<CR>`. Ignored while a prompt is
+    /// open.
+    pub fn on_mouse(&mut self, mouse: Mouse, now: Instant) {
+        if !matches!(self.mode, Mode::Normal) {
+            return;
+        }
+        match mouse {
+            Mouse::ScrollUp => (0..SCROLL_ROWS).for_each(|_| self.do_action(Action::Up)),
+            Mouse::ScrollDown => (0..SCROLL_ROWS).for_each(|_| self.do_action(Action::Down)),
+            Mouse::Click { column, row } => self.click(column, row, now),
+        }
+    }
+
+    fn click(&mut self, column: u16, row: u16, now: Instant) {
+        // Like a keystroke: clears the message line and any half-typed sequence
+        // or pending confirmation.
+        self.message = None;
+        self.pending.clear();
+        self.confirm_delete = None;
+        let double = self
+            .last_click
+            .is_some_and(|(at, c, r)| (c, r) == (column, row) && now.duration_since(at) < DOUBLE_CLICK);
+        self.last_click = if double { None } else { Some((now, column, row)) };
+
+        let at = Position { x: column, y: row };
+        if let Some(tab) = self.areas.tabs.iter().position(|r| r.contains(at)) {
+            return self.switch_tab(tab);
+        }
+        if !self.areas.body.contains(at) {
+            return;
+        }
+        let index = self.list_offset() + (row - self.areas.body.y) as usize;
+        if self.select_row(index) && double {
+            self.do_action(Action::PlaySelected);
+        }
+    }
+
+    /// The first row on screen of the list the body shows.
+    fn list_offset(&self) -> usize {
+        match &self.settings {
+            Some(page) => page.offset,
+            None if self.tab == QUEUE => self.queue_offset,
+            None => self.view().map_or(0, |v| v.offset),
+        }
+    }
+
+    /// Select row `index` of the list the body shows; false when there's no
+    /// row there or it's a header.
+    fn select_row(&mut self, index: usize) -> bool {
+        if let Some(page) = self.settings.as_mut() {
+            if !SETTING_ROWS.get(index).is_some_and(|s| !matches!(s, Setting::Header(_))) {
+                return false;
+            }
+            page.selected = index;
+            return true;
+        }
+        if self.tab == QUEUE {
+            if index >= self.queue_rows() {
+                return false;
+            }
+            self.queue_selected = index;
+            return true;
+        }
+        match self.view_mut() {
+            Some(view) if !view.loading && view.rows.get(index).is_some_and(Row::selectable) => {
+                view.selected = index;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1028,6 +1136,80 @@ mod tests {
 
     fn sent_cmds(app: &App) -> Vec<(&'static str, Value)> {
         app.outbox.iter().map(|(c, a, _)| (*c, a.clone())).collect()
+    }
+
+    /// Lay the app out like a frame would: tabline on row 0, list from row 1.
+    fn lay_out(app: &mut App) {
+        app.areas = Areas {
+            tabs: vec![Rect::new(0, 0, 7, 1), Rect::new(7, 0, 11, 1), Rect::new(18, 0, 8, 1)],
+            body: Rect::new(0, 1, 80, 10),
+        };
+    }
+
+    fn click(app: &mut App, row: u16, at: Instant) {
+        app.on_mouse(Mouse::Click { column: 5, row }, at);
+    }
+
+    #[test]
+    fn click_selects_and_a_second_click_plays() {
+        let mut app = app_with_queue(5);
+        lay_out(&mut app);
+        let t = Instant::now();
+        click(&mut app, 3, t);
+        assert_eq!(app.queue_selected, 2);
+        assert!(app.outbox.is_empty());
+        click(&mut app, 3, t + Duration::from_millis(200));
+        assert_eq!(sent_cmds(&app), vec![("jump", json!({ "index": 1 }))]);
+    }
+
+    #[test]
+    fn slow_second_click_only_selects() {
+        let mut app = app_with_queue(5);
+        lay_out(&mut app);
+        let t = Instant::now();
+        click(&mut app, 3, t);
+        click(&mut app, 3, t + Duration::from_secs(1));
+        assert!(app.outbox.is_empty());
+    }
+
+    #[test]
+    fn click_counts_from_the_first_row_on_screen_and_skips_headers() {
+        let mut app = app_with_queue(1);
+        lay_out(&mut app);
+        press(&mut app, "/zu<CR>");
+        answer_last(&mut app, json!({ "tracks": [track_json(7), track_json(8)], "albums": [], "artists": [], "playlists": [] }));
+        let header = app.view().unwrap().rows.iter().position(|r| !r.selectable()).unwrap();
+        let before = app.view().unwrap().selected;
+        click(&mut app, 1 + header as u16, Instant::now());
+        assert_eq!(app.view().unwrap().selected, before, "a header can't be selected");
+
+        app.stacks[SEARCH].last_mut().unwrap().offset = header + 1;
+        click(&mut app, 2, Instant::now());
+        assert_eq!(app.view().unwrap().selected, header + 2);
+        assert!(matches!(app.selected_row(), Some(Row::Track(t)) if t.id == 8));
+    }
+
+    #[test]
+    fn click_on_a_tab_switches_and_wheel_moves() {
+        let mut app = app_with_queue(10);
+        lay_out(&mut app);
+        app.on_mouse(Mouse::ScrollDown, Instant::now());
+        assert_eq!(app.queue_selected, SCROLL_ROWS);
+        app.on_mouse(Mouse::ScrollUp, Instant::now());
+        assert_eq!(app.queue_selected, 0);
+        app.on_mouse(Mouse::Click { column: 20, row: 0 }, Instant::now());
+        assert_eq!(app.tab, SEARCH);
+    }
+
+    #[test]
+    fn mouse_waits_while_a_prompt_is_open() {
+        let mut app = app_with_queue(5);
+        lay_out(&mut app);
+        press(&mut app, "/");
+        click(&mut app, 3, Instant::now());
+        app.on_mouse(Mouse::ScrollDown, Instant::now());
+        assert_eq!(app.queue_selected, 0);
+        assert!(matches!(app.mode, Mode::Prompt(PromptKind::Search, _)));
     }
 
     #[test]

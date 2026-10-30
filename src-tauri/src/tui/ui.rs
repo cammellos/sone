@@ -1,5 +1,6 @@
 //! Drawing: tabline, the tab's content, statusline, command line. Reads the
-//! app, changes nothing but the list height it records for paging.
+//! app, changes nothing but what it records of the frame: the list height for
+//! paging, list offsets and where things are for the mouse.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -25,6 +26,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
 
     draw_tabline(app, frame, tabline);
     app.list_height = body.height as usize;
+    app.areas.body = body;
     if app.settings.is_some() {
         draw_settings(app, frame, body);
     } else if app.tab == QUEUE {
@@ -36,8 +38,17 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     draw_cmdline(app, frame, cmdline);
 }
 
-fn draw_tabline(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_tabline(app: &mut App, frame: &mut Frame, area: Rect) {
     let c = app.config.colors;
+    let mut x = area.x;
+    app.areas.tabs = TABS
+        .iter()
+        .map(|name| {
+            let width = cols(&format!(" {name} ")) as u16;
+            x += width;
+            Rect { x: x - width, y: area.y, width, height: 1 }
+        })
+        .collect();
     let mut spans: Vec<Span> = TABS
         .iter()
         .enumerate()
@@ -66,7 +77,7 @@ fn hint(app: &App, frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(format!(" {text}")).style(Style::default().fg(app.config.colors.text_dim)), area);
 }
 
-fn draw_queue(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_queue(app: &mut App, frame: &mut Frame, area: Rect) {
     let c = app.config.colors;
     if app.queue_rows() == 0 {
         let search = app.config.keymap.describe(Action::Search).unwrap_or_default();
@@ -84,10 +95,10 @@ fn draw_queue(app: &App, frame: &mut Frame, area: Rect) {
     for t in &app.upcoming {
         items.push(line_item(&format!("   {} – {}", t.artist, t.title), &mmss(t.duration), width, Style::default().fg(c.text)));
     }
-    render_list(frame, area, items, app.queue_selected, &c);
+    app.queue_offset = render_list(frame, area, items, app.queue_selected, app.queue_offset, &c);
 }
 
-fn draw_view(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_view(app: &mut App, frame: &mut Frame, area: Rect) {
     let c = app.config.colors;
     let Some(view) = app.view() else {
         let search = app.config.keymap.describe(Action::Search).unwrap_or_default();
@@ -102,7 +113,10 @@ fn draw_view(app: &App, frame: &mut Frame, area: Rect) {
     }
     let width = area.width as usize;
     let items: Vec<ListItem> = view.rows.iter().map(|r| row_item(r, view, width, &c)).collect();
-    render_list(frame, area, items, view.selected, &c);
+    let offset = render_list(frame, area, items, view.selected, view.offset, &c);
+    if let Some(view) = app.stacks[app.tab].last_mut() {
+        view.offset = offset;
+    }
 }
 
 fn row_item<'a>(row: &Row, view: &View, width: usize, c: &Colors) -> ListItem<'a> {
@@ -139,7 +153,7 @@ fn row_item<'a>(row: &Row, view: &View, width: usize, c: &Colors) -> ListItem<'a
     }
 }
 
-fn draw_settings(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_settings(app: &mut App, frame: &mut Frame, area: Rect) {
     let c = app.config.colors;
     let Some(page) = &app.settings else { return };
     let v = &page.values;
@@ -182,13 +196,19 @@ fn draw_settings(app: &App, frame: &mut Frame, area: Rect) {
             line_item(&format!("   {label}"), &value, width, text)
         })
         .collect();
-    render_list(frame, area, items, page.selected, &c);
+    let offset = render_list(frame, area, items, page.selected, page.offset, &c);
+    if let Some(page) = app.settings.as_mut() {
+        page.offset = offset;
+    }
 }
 
-fn render_list(frame: &mut Frame, area: Rect, items: Vec<ListItem>, selected: usize, c: &Colors) {
+/// Draw a list from last frame's first row, scrolled only as far as the
+/// selection needs; returns the first row it drew.
+fn render_list(frame: &mut Frame, area: Rect, items: Vec<ListItem>, selected: usize, offset: usize, c: &Colors) -> usize {
     let list = List::new(items).highlight_style(Style::default().bg(c.panel).fg(c.text_bright));
-    let mut state = ListState::default().with_selected(Some(selected));
+    let mut state = ListState::default().with_selected(Some(selected)).with_offset(offset);
     frame.render_stateful_widget(list, area, &mut state);
+    state.offset()
 }
 
 /// `left` and `right` on one line, `left` cut with "…" when it doesn't fit.
